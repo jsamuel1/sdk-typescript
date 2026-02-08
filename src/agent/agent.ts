@@ -43,10 +43,23 @@ import {
 } from '../hooks/events.js'
 
 /**
+ * Interface for objects that can provide tools to an Agent.
+ * Implemented by McpClient and A2AClient.
+ */
+export interface ToolProvider {
+  /**
+   * Returns the tools provided by this source.
+   *
+   * @returns A promise resolving to an array of tools.
+   */
+  listTools(): Promise<Tool[]>
+}
+
+/**
  * Recursive type definition for nested tool arrays.
  * Allows tools to be organized in nested arrays of any depth.
  */
-export type ToolList = (Tool | McpClient | ToolList)[]
+export type ToolList = (Tool | McpClient | ToolProvider | ToolList)[]
 
 /**
  * Configuration object for creating a new Agent.
@@ -153,6 +166,7 @@ export class Agent implements AgentData {
 
   private _toolRegistry: ToolRegistry
   private _mcpClients: McpClient[]
+  private _toolProviders: ToolProvider[]
   private _initialized: boolean
   private _isInvoking: boolean = false
   private _printer?: Printer
@@ -178,9 +192,10 @@ export class Agent implements AgentData {
       this.model = config?.model ?? new BedrockModel()
     }
 
-    const { tools, mcpClients } = flattenTools(config?.tools ?? [])
+    const { tools, mcpClients, toolProviders } = flattenTools(config?.tools ?? [])
     this._toolRegistry = new ToolRegistry(tools)
     this._mcpClients = mcpClients
+    this._toolProviders = toolProviders
 
     if (config?.systemPrompt !== undefined) {
       this.systemPrompt = systemPromptFromData(config.systemPrompt)
@@ -203,6 +218,13 @@ export class Agent implements AgentData {
     await Promise.all(
       this._mcpClients.map(async (client) => {
         const tools = await client.listTools()
+        this._toolRegistry.addAll(tools)
+      })
+    )
+
+    await Promise.all(
+      this._toolProviders.map(async (provider) => {
+        const tools = await provider.listTools()
         this._toolRegistry.addAll(tools)
       })
     )
@@ -660,25 +682,44 @@ export class Agent implements AgentData {
 }
 
 /**
+ * Type guard for ToolProvider interface.
+ *
+ * @param item - The item to check.
+ * @returns True if the item implements ToolProvider.
+ */
+function isToolProvider(item: unknown): item is ToolProvider {
+  return (
+    typeof item === 'object' &&
+    item !== null &&
+    'listTools' in item &&
+    typeof (item as ToolProvider).listTools === 'function'
+  )
+}
+
+/**
  * Recursively flattens nested arrays of tools into a single flat array.
  * @param tools - Tools or nested arrays of tools
- * @returns Flat array of tools and MCP clients
+ * @returns Flat array of tools, MCP clients, and tool providers
  */
-function flattenTools(toolList: ToolList): { tools: Tool[]; mcpClients: McpClient[] } {
+function flattenTools(toolList: ToolList): { tools: Tool[]; mcpClients: McpClient[]; toolProviders: ToolProvider[] } {
   const tools: Tool[] = []
   const mcpClients: McpClient[] = []
+  const toolProviders: ToolProvider[] = []
 
   for (const item of toolList) {
     if (Array.isArray(item)) {
-      const { tools: nestedTools, mcpClients: nestedMcpClients } = flattenTools(item)
-      tools.push(...nestedTools)
-      mcpClients.push(...nestedMcpClients)
+      const nested = flattenTools(item)
+      tools.push(...nested.tools)
+      mcpClients.push(...nested.mcpClients)
+      toolProviders.push(...nested.toolProviders)
     } else if (item instanceof McpClient) {
       mcpClients.push(item)
+    } else if (isToolProvider(item)) {
+      toolProviders.push(item)
     } else {
       tools.push(item)
     }
   }
 
-  return { tools, mcpClients }
+  return { tools, mcpClients, toolProviders }
 }
