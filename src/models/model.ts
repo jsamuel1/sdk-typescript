@@ -124,6 +124,13 @@ export abstract class Model<T extends BaseModelConfig = BaseModelConfig> {
   abstract getConfig(): T
 
   /**
+   * The model ID from the current configuration, if configured.
+   */
+  get modelId(): string | undefined {
+    return this.getConfig().modelId
+  }
+
+  /**
    * Streams a conversation with the model.
    * Returns an async iterable that yields streaming events as they occur.
    *
