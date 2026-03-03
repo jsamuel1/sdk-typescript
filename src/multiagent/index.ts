@@ -16,3 +16,6 @@ export type { EdgeHandler, EdgeDefinition } from './edge.js'
 
 export { Swarm, SwarmNode, SharedContext, SwarmError } from './swarm.js'
 export type { SwarmOptions, SwarmInvokeOptions, SwarmResult, SwarmState, SwarmEvent } from './swarm.js'
+
+export { Graph, GraphError } from './graph.js'
+export type { GraphOptions, GraphResult } from './graph.js'

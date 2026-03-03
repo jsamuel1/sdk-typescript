@@ -198,6 +198,8 @@ export * as telemetry from './telemetry/index.js'
 // Multi-agent orchestration
 export { Swarm, SwarmNode, SharedContext, SwarmError } from './multiagent/swarm.js'
 export type { SwarmOptions, SwarmInvokeOptions, SwarmResult, SwarmState } from './multiagent/swarm.js'
+export { Graph, GraphError } from './multiagent/graph.js'
+export type { GraphOptions, GraphResult } from './multiagent/graph.js'
 export {
   MultiAgentState,
   MultiAgentResult,
@@ -206,9 +208,18 @@ export {
   Status,
   Node,
   AgentNode,
+  Edge,
   NodeStreamUpdateEvent,
   NodeResultEvent,
   MultiAgentHandoffEvent,
   MultiAgentResultEvent,
 } from './multiagent/index.js'
-export type { MultiAgentStreamEvent, NodeConfig, AgentNodeOptions } from './multiagent/index.js'
+export type {
+  MultiAgentStreamEvent,
+  NodeConfig,
+  AgentNodeOptions,
+  EdgeHandler,
+  EdgeDefinition,
+  NodeDefinition,
+  NodeType,
+} from './multiagent/index.js'

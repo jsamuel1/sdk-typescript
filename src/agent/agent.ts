@@ -473,91 +473,91 @@ export class Agent implements AgentData {
         let modelMessage: Message
 
         try {
-        // If resuming from interrupt, skip model invocation and re-execute tools
-        if (this._interruptState.activated) {
-          modelMessage = this._interruptState.context['toolUseMessage'] as Message
-        } else {
-          const modelResult = yield* this.invokeModel(currentArgs, forcedToolChoice)
-          currentArgs = undefined // Only pass args on first invocation
-          const wasForced = forcedToolChoice !== undefined
-          forcedToolChoice = undefined // Clear after use
+          // If resuming from interrupt, skip model invocation and re-execute tools
+          if (this._interruptState.activated) {
+            modelMessage = this._interruptState.context['toolUseMessage'] as Message
+          } else {
+            const modelResult = yield* this.invokeModel(currentArgs, forcedToolChoice)
+            currentArgs = undefined // Only pass args on first invocation
+            const wasForced = forcedToolChoice !== undefined
+            forcedToolChoice = undefined // Clear after use
 
-          if (modelResult.stopReason !== 'toolUse') {
-            // Special handling for maxTokens - always fail regardless of whether we have structured output
-            if (modelResult.stopReason === 'maxTokens') {
-              throw new MaxTokensError(
-                'The model reached maxTokens before producing structured output. Consider increasing maxTokens in your model configuration.',
-                modelResult.message
-              )
-            }
-
-            // Check if we need to force structured output tool
-            if (!context.hasResult()) {
-              if (wasForced) {
-                // Already tried forcing - LLM refused to use the tool
-                throw new StructuredOutputException(
-                  'The model failed to invoke the structured output tool even after it was forced.'
+            if (modelResult.stopReason !== 'toolUse') {
+              // Special handling for maxTokens - always fail regardless of whether we have structured output
+              if (modelResult.stopReason === 'maxTokens') {
+                throw new MaxTokensError(
+                  'The model reached maxTokens before producing structured output. Consider increasing maxTokens in your model configuration.',
+                  modelResult.message
                 )
               }
 
-              // Force the model to use the structured output tool
-              const toolName = context.getToolName()
-              forcedToolChoice = { tool: { name: toolName } }
+              // Check if we need to force structured output tool
+              if (!context.hasResult()) {
+                if (wasForced) {
+                  // Already tried forcing - LLM refused to use the tool
+                  throw new StructuredOutputException(
+                    'The model failed to invoke the structured output tool even after it was forced.'
+                  )
+                }
+
+                // Force the model to use the structured output tool
+                const toolName = context.getToolName()
+                forcedToolChoice = { tool: { name: toolName } }
+                this._tracer.endAgentLoopSpan(cycleSpan)
+                continue
+              }
+
+              // Loop terminates - no tool use requested (and structured output satisfied if needed)
+              yield this._appendMessage(modelResult.message)
+
+              // End cycle span
               this._tracer.endAgentLoopSpan(cycleSpan)
-              continue
+
+              const structuredOutput = context.getResult()
+              result = new AgentResult({
+                stopReason: modelResult.stopReason,
+                lastMessage: modelResult.message,
+                structuredOutput,
+              })
+              return result
             }
 
-            // Loop terminates - no tool use requested (and structured output satisfied if needed)
-            yield this._appendMessage(modelResult.message)
+            modelMessage = modelResult.message
+          }
+
+          // Execute tools sequentially (handles interrupts internally)
+          const toolExecResult = yield* this.executeTools(modelMessage, this._toolRegistry)
+
+          if (toolExecResult.interrupted) {
+            // Interrupts were raised — save context and stop the loop
+            this._interruptState.context['toolUseMessage'] = modelMessage
+            this._interruptState.context['toolResults'] = toolExecResult.toolResults
+            this._interruptState.activate()
+
+            const interrupts = [...this._interruptState.interrupts.values()]
+            yield new InterruptEvent({ agent: this, interrupts })
+
+            // Append the assistant message so conversation state is valid
+            yield this._appendMessage(modelMessage)
 
             // End cycle span
             this._tracer.endAgentLoopSpan(cycleSpan)
 
-            const structuredOutput = context.getResult()
             result = new AgentResult({
-              stopReason: modelResult.stopReason,
-              lastMessage: modelResult.message,
-              structuredOutput,
+              stopReason: 'interrupt',
+              lastMessage: modelMessage,
+              interrupts,
             })
             return result
           }
 
-          modelMessage = modelResult.message
-        }
+          this._interruptState.deactivate()
 
-        // Execute tools sequentially (handles interrupts internally)
-        const toolExecResult = yield* this.executeTools(modelMessage, this._toolRegistry)
-
-        if (toolExecResult.interrupted) {
-          // Interrupts were raised — save context and stop the loop
-          this._interruptState.context['toolUseMessage'] = modelMessage
-          this._interruptState.context['toolResults'] = toolExecResult.toolResults
-          this._interruptState.activate()
-
-          const interrupts = [...this._interruptState.interrupts.values()]
-          yield new InterruptEvent({ agent: this, interrupts })
-
-          // Append the assistant message so conversation state is valid
+          /**
+           * Deferred append: both messages are added AFTER tool execution completes.
+           */
           yield this._appendMessage(modelMessage)
-
-          // End cycle span
-          this._tracer.endAgentLoopSpan(cycleSpan)
-
-          result = new AgentResult({
-            stopReason: 'interrupt',
-            lastMessage: modelMessage,
-            interrupts,
-          })
-          return result
-        }
-
-        this._interruptState.deactivate()
-
-        /**
-         * Deferred append: both messages are added AFTER tool execution completes.
-         */
-        yield this._appendMessage(modelMessage)
-        yield this._appendMessage(toolExecResult.message)
+          yield this._appendMessage(toolExecResult.message)
 
           // End cycle span
           this._tracer.endAgentLoopSpan(cycleSpan)
