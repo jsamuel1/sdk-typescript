@@ -172,6 +172,10 @@ export class Tracer {
    * @param options - Options for ending the span including response, error, and usage data
    */
   endAgentSpan(span: Span | null, options: EndAgentSpanOptions = {}): void {
+    // Clear stale state from any previous invocation
+    this._agentSpan = undefined
+    this._loopSpan = undefined
+
     if (!span) return
 
     const { response, error, accumulatedUsage, stopReason } = options
@@ -182,7 +186,6 @@ export class Tracer {
       if (response !== undefined) this._addResponseEvent(span, response, stopReason)
 
       this._endSpan(span, attributes, error)
-      this._agentSpan = undefined
     } catch (err) {
       logger.warn(`error=<${err}> | failed to end agent span`)
     }
@@ -332,6 +335,19 @@ export class Tracer {
     } catch (err) {
       logger.warn(`error=<${err}> | failed to end tool call span`)
     }
+  }
+  /**
+   * Runs a callback with the given span set as the active OpenTelemetry context.
+   * Downstream code (e.g., MCP clients) can read the span from context.active()
+   * for distributed trace propagation. No-ops if span is null.
+   *
+   * @param span - The span to set as active, or null if span creation failed
+   * @param fn - The callback to run within the span's context
+   * @returns The return value of the callback
+   */
+  withSpanContext<T>(span: Span | null, fn: () => T): T {
+    if (!span) return fn()
+    return context.with(trace.setSpan(context.active(), span), fn)
   }
 
   /**
