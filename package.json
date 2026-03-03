@@ -30,6 +30,10 @@
       "types": "./dist/src/models/gemini/model.d.ts",
       "default": "./dist/src/models/gemini/model.js"
     },
+    "./a2a": {
+      "types": "./dist/src/a2a/index.d.ts",
+      "default": "./dist/src/a2a/index.js"
+    },
     "./vended_tools/notebook": {
       "types": "./dist/src/vended-tools/notebook/index.d.ts",
       "default": "./dist/src/vended-tools/notebook/index.js"
@@ -81,16 +85,18 @@
   "author": "Strands Agents",
   "license": "Apache-2.0",
   "devDependencies": {
+    "@a2a-js/sdk": "^0.3.10",
     "@anthropic-ai/sdk": "^0.71.2",
     "@aws-sdk/client-s3": "^3.943.0",
     "@aws-sdk/client-secrets-manager": "^3.943.0",
     "@aws-sdk/credential-providers": "^3.943.0",
+    "@google/genai": "^1.40.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.57.2",
     "@opentelemetry/resources": "^1.30.1",
     "@opentelemetry/sdk-trace-base": "^1.30.1",
     "@opentelemetry/sdk-trace-node": "^1.30.1",
-    "@google/genai": "^1.40.0",
+    "@types/express": "^5.0.6",
     "@types/json-schema": "^7.0.15",
     "@types/node": "^24.6.0",
     "@typescript-eslint/eslint-plugin": "^8.48.1",
@@ -100,6 +106,7 @@
     "@vitest/coverage-v8": "^4.0.15",
     "eslint": "^9.0.0",
     "eslint-plugin-tsdoc": "^0.5.0",
+    "express": "^5.2.1",
     "husky": "^9.1.7",
     "openai": "^6.7.0",
     "playwright": "^1.56.1",
@@ -123,6 +130,7 @@
     "@aws-sdk/client-bedrock-runtime": "^3.943.0"
   },
   "peerDependencies": {
+    "@a2a-js/sdk": "^0.3.10",
     "@anthropic-ai/sdk": "^0.71.2",
     "@aws-sdk/client-s3": "^3.943.0",
     "@google/genai": "^1.40.0",
@@ -132,6 +140,7 @@
     "@opentelemetry/resources": "^1.30.1",
     "@opentelemetry/sdk-trace-base": "^1.30.1",
     "@opentelemetry/sdk-trace-node": "^1.30.1",
+    "express": "^5.1.0",
     "openai": "^6.7.0",
     "zod": "^4.1.12"
   },
@@ -147,9 +156,18 @@
     },
     "openai": {
       "optional": true
+    },
+    "@a2a-js/sdk": {
+      "optional": true
+    },
+    "express": {
+      "optional": true
     }
   },
   "overrides": {
     "fast-xml-parser": ">=5.3.6"
+  },
+  "optionalDependencies": {
+    "@a2a-js/sdk": "^0.3.10"
   }
 }
