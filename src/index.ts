@@ -88,6 +88,21 @@ export type {
   DocumentContentBlockData,
 } from './types/media.js'
 
+// Document types
+export type { CitationsConfig } from './types/documents.js'
+
+// Citation types
+export type {
+  CitationLocation,
+  CitationSourceContent,
+  CitationGeneratedContent,
+  Citation,
+  CitationsContentBlockData,
+} from './types/citations.js'
+
+// Citation classes
+export { CitationsContentBlock } from './types/citations.js'
+
 // Tool types
 export type { ToolSpec, ToolUse, ToolResultStatus, ToolChoice } from './tools/types.js'
 
