@@ -196,6 +196,10 @@ export {
   SlidingWindowConversationManager,
   type SlidingWindowConversationManagerConfig,
 } from './conversation-manager/sliding-window-conversation-manager.js'
+export {
+  SummarizingConversationManager,
+  type SummarizingConversationManagerConfig,
+} from './conversation-manager/summarizing-conversation-manager.js'
 
 // Logging
 export { configureLogging } from './logging/logger.js'
