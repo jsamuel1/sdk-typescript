@@ -1,71 +1,151 @@
+import type { JSONSerializable, Serialized } from './json.js'
+
 /**
- * Citation content types.
+ * Citation types for document citation content blocks.
  *
- * This module defines types for citations that reference source documents.
- * Citations allow the model to provide specific references to document content
- * that supports its generated responses.
+ * Citations are returned by models when document citations are enabled.
+ * They are output-only blocks that appear in conversation history.
  */
 
 /**
- * Location within a source document.
- * Can specify character positions, chunks, or pages depending on the document type.
+ * Discriminated union of citation location types.
+ * Each variant uses a `type` field to identify the location kind.
  */
-export interface CitationLocation {
-  /**
-   * Optional index of the document being referenced.
-   */
-  documentIndex?: number
+export type CitationLocation =
+  | {
+      /**
+       * Location referencing character positions within a document.
+       */
+      type: 'documentChar'
 
-  /**
-   * Optional start position within the document.
-   */
-  start?: number
+      /**
+       * Index of the source document.
+       */
+      documentIndex: number
 
-  /**
-   * Optional end position within the document.
-   */
-  end?: number
-}
+      /**
+       * Start character position.
+       */
+      start: number
+
+      /**
+       * End character position.
+       */
+      end: number
+    }
+  | {
+      /**
+       * Location referencing page positions within a document.
+       */
+      type: 'documentPage'
+
+      /**
+       * Index of the source document.
+       */
+      documentIndex: number
+
+      /**
+       * Start page number.
+       */
+      start: number
+
+      /**
+       * End page number.
+       */
+      end: number
+    }
+  | {
+      /**
+       * Location referencing chunk positions within a document.
+       */
+      type: 'documentChunk'
+
+      /**
+       * Index of the source document.
+       */
+      documentIndex: number
+
+      /**
+       * Start chunk index.
+       */
+      start: number
+
+      /**
+       * End chunk index.
+       */
+      end: number
+    }
+  | {
+      /**
+       * Location referencing a search result.
+       */
+      type: 'searchResult'
+
+      /**
+       * Index of the search result.
+       */
+      searchResultIndex: number
+
+      /**
+       * Start position within the search result.
+       */
+      start: number
+
+      /**
+       * End position within the search result.
+       */
+      end: number
+    }
+  | {
+      /**
+       * Location referencing a web URL.
+       */
+      type: 'web'
+
+      /**
+       * The URL of the web source.
+       */
+      url: string
+
+      /**
+       * The domain of the web source.
+       */
+      domain?: string
+    }
 
 /**
- * Source content from a citation.
- * Contains the actual text that was referenced from the source document.
+ * Source content referenced by a citation.
+ * Modeled as a union type for future extensibility.
  */
-export interface CitationSourceContent {
-  /**
-   * Text content from the source document.
-   */
-  text: string
-}
+export type CitationSourceContent = { text: string }
 
 /**
- * Generated content from a citation.
- * Contains the text that the model generated based on the cited source.
+ * Generated content associated with a citation.
+ * Modeled as a union type for future extensibility.
  */
-export interface CitationGeneratedContent {
-  /**
-   * Generated text content.
-   */
-  text: string
-}
+export type CitationGeneratedContent = { text: string }
 
 /**
- * A single citation referencing a source document.
- * Links generated content to specific locations in source documents.
+ * A single citation linking generated content to a source location.
  */
 export interface Citation {
   /**
-   * Location information for where this citation points in the source document.
+   * The location of the cited source.
    */
   location: CitationLocation
 
   /**
-   * Array of source content that was referenced.
+   * The source identifier string.
+   */
+  source: string
+
+  /**
+   * The source content referenced by this citation.
    */
   sourceContent: CitationSourceContent[]
 
   /**
-   * Title or identifier for the cited source.
+   * Title of the cited source.
    */
   title: string
 }
@@ -73,41 +153,66 @@ export interface Citation {
 /**
  * Data for a citations content block.
  */
-export interface CitationsContentBlockData {
+export interface CitationsBlockData {
   /**
-   * Array of citations linking to source documents.
+   * Array of citations linking generated content to source locations.
    */
   citations: Citation[]
 
   /**
-   * Array of generated content associated with the citations.
+   * The generated content associated with these citations.
    */
   content: CitationGeneratedContent[]
 }
 
 /**
- * Content block containing citations and generated content.
- * Used to return structured citation information that links generated text
- * to specific source documents.
+ * Citations content block within a message.
+ * Returned by models when document citations are enabled.
+ * This is an output-only block — users do not construct these directly.
  */
-export class CitationsContentBlock implements CitationsContentBlockData {
+export class CitationsBlock
+  implements CitationsBlockData, JSONSerializable<{ citations: Serialized<CitationsBlockData> }>
+{
   /**
    * Discriminator for citations content.
    */
-  readonly type = 'citationsContentBlock' as const
+  readonly type = 'citationsBlock' as const
 
   /**
-   * Array of citations linking to source documents.
+   * Array of citations linking generated content to source locations.
    */
   readonly citations: Citation[]
 
   /**
-   * Array of generated content associated with the citations.
+   * The generated content associated with these citations.
    */
   readonly content: CitationGeneratedContent[]
 
-  constructor(data: CitationsContentBlockData) {
+  constructor(data: CitationsBlockData) {
     this.citations = data.citations
     this.content = data.content
+  }
+
+  /**
+   * Serializes the CitationsBlock to a JSON-compatible ContentBlockData object.
+   * Called automatically by JSON.stringify().
+   */
+  toJSON(): { citations: Serialized<CitationsBlockData> } {
+    return {
+      citations: {
+        citations: this.citations,
+        content: this.content,
+      },
+    }
+  }
+
+  /**
+   * Creates a CitationsBlock instance from its wrapped data format.
+   *
+   * @param data - Wrapped CitationsBlockData to deserialize
+   * @returns CitationsBlock instance
+   */
+  static fromJSON(data: { citations: Serialized<CitationsBlockData> }): CitationsBlock {
+    return new CitationsBlock(data.citations)
   }
 }

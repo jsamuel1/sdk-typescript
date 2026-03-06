@@ -1,31 +1,29 @@
+import { AgentResult, type AgentStreamEvent } from '../types/agent.js'
+import { BedrockModel } from '../models/bedrock.js'
 import {
-  AgentResult,
-  type AgentStreamEvent,
-  BedrockModel,
   contentBlockFromData,
   type ContentBlock,
   type ContentBlockData,
-  type JSONValue,
-  McpClient,
   Message,
   type MessageData,
   type StopReason,
   type SystemPrompt,
   type SystemPromptData,
   TextBlock,
-  type Tool,
-  type ToolChoice,
-  type ToolContext,
   ToolResultBlock,
   ToolUseBlock,
-} from '../index.js'
+} from '../types/messages.js'
+import type { JSONValue } from '../types/json.js'
+import { McpClient } from '../mcp.js'
+import { type Tool, type ToolContext } from '../tools/tool.js'
+import type { ToolChoice } from '../tools/types.js'
 import { systemPromptFromData } from '../types/messages.js'
 import { normalizeError, ConcurrentInvocationError, MaxTokensError } from '../errors.js'
 import { Model } from '../models/model.js'
 import type { BaseModelConfig, StreamOptions } from '../models/model.js'
 import { isModelStreamEvent } from '../models/streaming.js'
 import { ToolRegistry } from '../registry/tool-registry.js'
-import { AgentState } from './state.js'
+import { AppState } from '../app-state.js'
 import type { AgentData } from '../types/agent.js'
 import { AgentPrinter, getDefaultAppender, type Printer } from './printer.js'
 import type { HookProvider } from '../hooks/types.js'
@@ -56,28 +54,12 @@ import type { z } from 'zod'
 import { Tracer } from '../telemetry/tracer.js'
 import type { Usage } from '../models/streaming.js'
 import type { AttributeValue } from '@opentelemetry/api'
-import { _InterruptState, InterruptException } from '../interrupt.js'
-import type { InterruptResponseContent } from '../interrupt.js'
-import { InterruptEvent } from '../hooks/events.js'
-
-/**
- * Interface for objects that can provide tools to an Agent.
- * Implemented by McpClient and A2AClient.
- */
-export interface ToolProvider {
-  /**
-   * Returns the tools provided by this source.
-   *
-   * @returns A promise resolving to an array of tools.
-   */
-  listTools(): Promise<Tool[]>
-}
 
 /**
  * Recursive type definition for nested tool arrays.
  * Allows tools to be organized in nested arrays of any depth.
  */
-export type ToolList = (Tool | McpClient | ToolProvider | ToolList)[]
+export type ToolList = (Tool | McpClient | ToolList)[]
 
 /**
  * Configuration object for creating a new Agent.
@@ -165,6 +147,16 @@ export type AgentConfig = {
  */
 export type InvokeArgs = string | ContentBlock[] | ContentBlockData[] | Message[] | MessageData[]
 
+/**
+ * Options for a single agent invocation.
+ */
+export interface InvokeOptions {
+  /**
+   * Zod schema for structured output validation, overriding the constructor-provided schema for this invocation only.
+   */
+  structuredOutputSchema?: z.ZodSchema
+}
+
 /** Fallback name used when no agent name is provided in the config. */
 const DEFAULT_AGENT_NAME = 'Strands Agent'
 
@@ -182,10 +174,10 @@ export class Agent implements AgentData {
    */
   public readonly messages: Message[]
   /**
-   * Agent state storage accessible to tools and application logic.
+   * App state storage accessible to tools and application logic.
    * State is not passed to the model during inference.
    */
-  public readonly state: AgentState
+  public readonly state: AppState
   /**
    * Conversation manager for handling message history and context overflow.
    */
@@ -218,7 +210,6 @@ export class Agent implements AgentData {
 
   private _toolRegistry: ToolRegistry
   private _mcpClients: McpClient[]
-  private _toolProviders: ToolProvider[]
   private _initialized: boolean
   private _isInvoking: boolean = false
   private _printer?: Printer
@@ -229,18 +220,13 @@ export class Agent implements AgentData {
   private _accumulatedTokenUsage: Usage = Agent._createEmptyUsage()
 
   /**
-   * @internal Interrupt state for human-in-the-loop workflows.
-   */
-  declare public _interruptState: _InterruptState
-
-  /**
    * Creates an instance of the Agent.
    * @param config - The configuration for the agent.
    */
   constructor(config?: AgentConfig) {
     // Initialize public fields
     this.messages = (config?.messages ?? []).map((msg) => (msg instanceof Message ? msg : Message.fromMessageData(msg)))
-    this.state = new AgentState(config?.state)
+    this.state = new AppState(config?.state)
     this.conversationManager = config?.conversationManager ?? new SlidingWindowConversationManager({ windowSize: 40 })
     this.name = config?.name ?? DEFAULT_AGENT_NAME
     this.agentId = config?.agentId ?? DEFAULT_AGENT_ID
@@ -256,10 +242,9 @@ export class Agent implements AgentData {
       this.model = config?.model ?? new BedrockModel()
     }
 
-    const { tools, mcpClients, toolProviders } = flattenTools(config?.tools ?? [])
+    const { tools, mcpClients } = flattenTools(config?.tools ?? [])
     this._toolRegistry = new ToolRegistry(tools)
     this._mcpClients = mcpClients
-    this._toolProviders = toolProviders
 
     if (config?.systemPrompt !== undefined) {
       this.systemPrompt = systemPromptFromData(config.systemPrompt)
@@ -277,13 +262,6 @@ export class Agent implements AgentData {
     // Initialize tracer - OTEL returns no-op tracer if not configured
     this._tracer = new Tracer(config?.traceAttributes)
 
-    // Initialize interrupt state (non-enumerable to avoid breaking equality checks)
-    Object.defineProperty(this, '_interruptState', {
-      value: new _InterruptState(),
-      writable: true,
-      enumerable: false,
-    })
-
     this._initialized = false
   }
 
@@ -295,13 +273,6 @@ export class Agent implements AgentData {
     await Promise.all(
       this._mcpClients.map(async (client) => {
         const tools = await client.listTools()
-        this._toolRegistry.addAll(tools)
-      })
-    )
-
-    await Promise.all(
-      this._toolProviders.map(async (provider) => {
-        const tools = await provider.listTools()
         this._toolRegistry.addAll(tools)
       })
     )
@@ -352,6 +323,7 @@ export class Agent implements AgentData {
    * streaming events.
    *
    * @param args - Arguments for invoking the agent
+   * @param options - Optional per-invocation options
    * @returns Promise that resolves to the final AgentResult
    *
    * @example
@@ -361,24 +333,13 @@ export class Agent implements AgentData {
    * console.log(result.lastMessage) // Agent's response
    * ```
    */
-  public async invoke(args: InvokeArgs): Promise<AgentResult> {
-    const gen = this.stream(args)
+  public async invoke(args: InvokeArgs, options?: InvokeOptions): Promise<AgentResult> {
+    const gen = this.stream(args, options)
     let result = await gen.next()
     while (!result.done) {
       result = await gen.next()
     }
     return result.value
-  }
-
-  /**
-   * Resume from an interrupt by providing responses.
-   *
-   * @param responses - Array of interrupt response content blocks
-   * @returns Promise that resolves to the final AgentResult
-   */
-  public async resumeFromInterrupt(responses: InterruptResponseContent[]): Promise<AgentResult> {
-    this._interruptState.resume(responses)
-    return this.invoke([])
   }
 
   /**
@@ -398,6 +359,7 @@ export class Agent implements AgentData {
    * with valid toolResponses
    *
    * @param args - Arguments for invoking the agent
+   * @param options - Optional per-invocation options
    * @returns Async generator that yields AgentStreamEvent objects and returns AgentResult
    *
    * @example
@@ -410,13 +372,16 @@ export class Agent implements AgentData {
    * // Messages array is mutated in place and contains the full conversation
    * ```
    */
-  public async *stream(args: InvokeArgs): AsyncGenerator<AgentStreamEvent, AgentResult, undefined> {
+  public async *stream(
+    args: InvokeArgs,
+    options?: InvokeOptions
+  ): AsyncGenerator<AgentStreamEvent, AgentResult, undefined> {
     using _lock = this.acquireLock()
 
     await this.initialize()
 
     // Delegate to _stream and process events through printer and hooks
-    const streamGenerator = this._stream(args)
+    const streamGenerator = this._stream(args, options)
     let result = await streamGenerator.next()
 
     while (!result.done) {
@@ -425,9 +390,7 @@ export class Agent implements AgentData {
       // Invoke hook callbacks for hookable events (all current events are hookable;
       // the guard exists for future StreamEvent subclasses that may not be)
       if (event instanceof HookableEvent) {
-        if (!event._hooksInvoked) {
-          await this.hooks.invokeCallbacks(event)
-        }
+        await this.hooks.invokeCallbacks(event)
       }
 
       this._printer?.processEvent(event)
@@ -449,15 +412,19 @@ export class Agent implements AgentData {
    * Separated to centralize printer event processing in the public stream method.
    *
    * @param args - Arguments for invoking the agent
+   * @param options - Optional per-invocation options
    * @returns Async generator that yields AgentStreamEvent objects and returns AgentResult
    */
-  private async *_stream(args: InvokeArgs): AsyncGenerator<AgentStreamEvent, AgentResult, undefined> {
+  private async *_stream(
+    args: InvokeArgs,
+    options?: InvokeOptions
+  ): AsyncGenerator<AgentStreamEvent, AgentResult, undefined> {
     let currentArgs: InvokeArgs | undefined = args
     let forcedToolChoice: ToolChoice | undefined = undefined
     let result: AgentResult | undefined
 
     // Create structured output context (uses null object pattern when no schema)
-    const schema = this._structuredOutputSchema
+    const schema = options?.structuredOutputSchema ?? this._structuredOutputSchema
     const context = createStructuredOutputContext(schema)
 
     // Emit event before the try block
@@ -492,94 +459,71 @@ export class Agent implements AgentData {
           messages: this.messages,
         })
 
-        let modelMessage: Message
-
         try {
-          // If resuming from interrupt, skip model invocation and re-execute tools
-          if (this._interruptState.activated) {
-            modelMessage = this._interruptState.context['toolUseMessage'] as Message
-          } else {
-            const modelResult = yield* this.invokeModel(currentArgs, forcedToolChoice)
-            currentArgs = undefined // Only pass args on first invocation
-            const wasForced = forcedToolChoice !== undefined
-            forcedToolChoice = undefined // Clear after use
+          const modelResult = yield* this.invokeModel(currentArgs, forcedToolChoice)
+          currentArgs = undefined // Only pass args on first invocation
+          const wasForced = forcedToolChoice !== undefined
+          forcedToolChoice = undefined // Clear after use
 
-            if (modelResult.stopReason !== 'toolUse') {
-              // Special handling for maxTokens - always fail regardless of whether we have structured output
-              if (modelResult.stopReason === 'maxTokens') {
-                throw new MaxTokensError(
-                  'The model reached maxTokens before producing structured output. Consider increasing maxTokens in your model configuration.',
-                  modelResult.message
+          if (modelResult.stopReason !== 'toolUse') {
+            // Special handling for maxTokens - always fail regardless of whether we have structured output
+            if (modelResult.stopReason === 'maxTokens') {
+              throw new MaxTokensError(
+                'The model reached maxTokens before producing structured output. Consider increasing maxTokens in your model configuration.',
+                modelResult.message
+              )
+            }
+
+            // Check if we need to force structured output tool
+            if (!context.hasResult()) {
+              if (wasForced) {
+                // Already tried forcing - LLM refused to use the tool
+                throw new StructuredOutputException(
+                  'The model failed to invoke the structured output tool even after it was forced.'
                 )
               }
 
-              // Check if we need to force structured output tool
-              if (!context.hasResult()) {
-                if (wasForced) {
-                  // Already tried forcing - LLM refused to use the tool
-                  throw new StructuredOutputException(
-                    'The model failed to invoke the structured output tool even after it was forced.'
-                  )
-                }
-
-                // Force the model to use the structured output tool
-                const toolName = context.getToolName()
-                forcedToolChoice = { tool: { name: toolName } }
-                this._tracer.endAgentLoopSpan(cycleSpan)
-                continue
-              }
-
-              // Loop terminates - no tool use requested (and structured output satisfied if needed)
-              yield this._appendMessage(modelResult.message)
-
-              // End cycle span
+              // Force the model to use the structured output tool
+              const toolName = context.getToolName()
+              forcedToolChoice = { tool: { name: toolName } }
               this._tracer.endAgentLoopSpan(cycleSpan)
-
-              const structuredOutput = context.getResult()
-              result = new AgentResult({
-                stopReason: modelResult.stopReason,
-                lastMessage: modelResult.message,
-                structuredOutput,
-              })
-              return result
+              continue
             }
 
-            modelMessage = modelResult.message
-          }
-
-          // Execute tools sequentially (handles interrupts internally)
-          const toolExecResult = yield* this.executeTools(modelMessage, this._toolRegistry)
-
-          if (toolExecResult.interrupted) {
-            // Interrupts were raised — save context and stop the loop
-            this._interruptState.context['toolUseMessage'] = modelMessage
-            this._interruptState.context['toolResults'] = toolExecResult.toolResults
-            this._interruptState.activate()
-
-            const interrupts = [...this._interruptState.interrupts.values()]
-            yield new InterruptEvent({ agent: this, interrupts })
-
-            // Append the assistant message so conversation state is valid
-            yield this._appendMessage(modelMessage)
+            // Loop terminates - no tool use requested (and structured output satisfied if needed)
+            yield this._appendMessage(modelResult.message)
 
             // End cycle span
             this._tracer.endAgentLoopSpan(cycleSpan)
 
+            const structuredOutput = context.getResult()
             result = new AgentResult({
-              stopReason: 'interrupt',
-              lastMessage: modelMessage,
-              interrupts,
+              stopReason: modelResult.stopReason,
+              lastMessage: modelResult.message,
+              structuredOutput,
             })
             return result
           }
 
-          this._interruptState.deactivate()
+          // Execute tools sequentially
+          const toolResultMessage = yield* this.executeTools(modelResult.message, this._toolRegistry)
 
           /**
            * Deferred append: both messages are added AFTER tool execution completes.
+           * This keeps agent.messages in a valid, reinvokable state at all times:
+           *
+           * - If interrupted during tool execution, messages has no dangling toolUse
+           *   without a matching toolResult, so the agent can be reinvoked cleanly.
+           * - The Python SDK appends the assistant message BEFORE tool execution,
+           *   requiring recovery logic (generate_missing_tool_result_content) on
+           *   interrupts. We avoid that by deferring.
+           * - Trade-off: MessageAddedEvent for the assistant message fires after tools
+           *   complete (not before as in Python), and agent.messages is incomplete
+           *   during tool execution. Events like BeforeToolsEvent.message and
+           *   BeforeToolCallEvent.toolUse provide the data directly.
            */
-          yield this._appendMessage(modelMessage)
-          yield this._appendMessage(toolExecResult.message)
+          yield this._appendMessage(modelResult.message)
+          yield this._appendMessage(toolResultMessage)
 
           // End cycle span
           this._tracer.endAgentLoopSpan(cycleSpan)
@@ -617,11 +561,6 @@ export class Agent implements AgentData {
    * @returns Array of messages to append to the conversation
    */
   private _normalizeInput(args?: InvokeArgs): Message[] {
-    // When resuming from interrupt, don't add new messages
-    if (this._interruptState.activated) {
-      return []
-    }
-
     if (args !== undefined) {
       if (typeof args === 'string') {
         // String input: wrap in TextBlock and create user Message
@@ -793,35 +732,16 @@ export class Agent implements AgentData {
   }
 
   /**
-   * Result of tool execution, which may be interrupted.
-   */
-  private _toolExecResult(
-    toolResultBlocks: ToolResultBlock[],
-    interrupted: boolean
-  ): { message: Message; toolResults: ToolResultBlock[]; interrupted: boolean } {
-    return {
-      message: new Message({ role: 'user', content: toolResultBlocks }),
-      toolResults: toolResultBlocks,
-      interrupted,
-    }
-  }
-
-  /**
    * Executes tools sequentially and streams all tool events.
-   * Handles interrupt exceptions from hook callbacks and tool cancellation.
    *
    * @param assistantMessage - The assistant message containing tool use blocks
    * @param toolRegistry - Registry containing available tools
-   * @returns Object with the tool result message, results array, and whether interrupted
+   * @returns User message containing tool results
    */
   private async *executeTools(
     assistantMessage: Message,
     toolRegistry: ToolRegistry
-  ): AsyncGenerator<
-    AgentStreamEvent,
-    { message: Message; toolResults: ToolResultBlock[]; interrupted: boolean },
-    undefined
-  > {
+  ): AsyncGenerator<AgentStreamEvent, Message, undefined> {
     yield new BeforeToolsEvent({ agent: this, message: assistantMessage })
 
     // Extract tool use blocks from assistant message
@@ -830,34 +750,14 @@ export class Agent implements AgentData {
     )
 
     if (toolUseBlocks.length === 0) {
+      // No tool use blocks found even though stopReason is toolUse
       throw new Error('Model indicated toolUse but no tool use blocks found in message')
     }
 
     const toolResultBlocks: ToolResultBlock[] = []
 
-    // When resuming from interrupt, carry forward previous tool results
-    if (this._interruptState.activated) {
-      const prevResults = this._interruptState.context['toolResults'] as ToolResultBlock[] | undefined
-      if (prevResults) {
-        toolResultBlocks.push(...prevResults)
-      }
-    }
-
-    // Filter to only tools that don't already have results (for interrupt resume)
-    const completedToolUseIds = new Set(toolResultBlocks.map((r) => r.toolUseId))
-    const pendingToolUseBlocks = toolUseBlocks.filter((b) => !completedToolUseIds.has(b.toolUseId))
-
-    for (const toolUseBlock of pendingToolUseBlocks) {
+    for (const toolUseBlock of toolUseBlocks) {
       const toolResultBlock = yield* this.executeTool(toolUseBlock, toolRegistry)
-
-      // Check if interrupted (executeTool returns null sentinel for interrupted tools)
-      if (toolResultBlock === null) {
-        // Interrupted — return partial results
-        const toolResultMessage = new Message({ role: 'user', content: toolResultBlocks })
-        yield new AfterToolsEvent({ agent: this, message: toolResultMessage })
-        return this._toolExecResult(toolResultBlocks, true)
-      }
-
       toolResultBlocks.push(toolResultBlock)
 
       // Yield the tool result event as it's created
@@ -865,24 +765,30 @@ export class Agent implements AgentData {
     }
 
     // Create user message with tool results
-    const toolResultMessage = new Message({ role: 'user', content: toolResultBlocks })
+    const toolResultMessage: Message = new Message({
+      role: 'user',
+      content: toolResultBlocks,
+    })
+
     yield new AfterToolsEvent({ agent: this, message: toolResultMessage })
 
-    return this._toolExecResult(toolResultBlocks, false)
+    return toolResultMessage
   }
 
   /**
    * Executes a single tool and returns the result.
-   * Returns null if the tool was interrupted (hook raised InterruptException).
+   * If the tool is not found or fails to return a result, returns an error ToolResult
+   * instead of throwing an exception. This allows the agent loop to continue and
+   * let the model handle the error gracefully.
    *
    * @param toolUseBlock - Tool use block to execute
    * @param toolRegistry - Registry containing available tools
-   * @returns Tool result block, or null if interrupted
+   * @returns Tool result block
    */
   private async *executeTool(
     toolUseBlock: ToolUseBlock,
     toolRegistry: ToolRegistry
-  ): AsyncGenerator<AgentStreamEvent, ToolResultBlock | null, undefined> {
+  ): AsyncGenerator<AgentStreamEvent, ToolResultBlock, undefined> {
     const tool = toolRegistry.find((t) => t.name === toolUseBlock.name)
 
     // Create toolUse object for hook events and telemetry
@@ -894,44 +800,7 @@ export class Agent implements AgentData {
 
     // Retry loop for tool execution
     while (true) {
-      const beforeEvent = new BeforeToolCallEvent({ agent: this, toolUse, tool })
-      beforeEvent._interruptState = this._interruptState
-
-      // Invoke hooks — may throw InterruptException
-      try {
-        await this.hooks.invokeCallbacks(beforeEvent)
-        beforeEvent._hooksInvoked = true
-      } catch (e) {
-        if (e instanceof InterruptException) {
-          // Hook raised an interrupt — signal to caller
-          return null
-        }
-        throw e
-      }
-
-      this._printer?.processEvent(beforeEvent)
-      yield beforeEvent
-
-      // Check if hook cancelled the tool
-      if (beforeEvent.cancelTool) {
-        const cancelMessage =
-          typeof beforeEvent.cancelTool === 'string' ? beforeEvent.cancelTool : 'tool cancelled by user'
-        const toolResult = new ToolResultBlock({
-          toolUseId: toolUseBlock.toolUseId,
-          status: 'error',
-          content: [new TextBlock(cancelMessage)],
-        })
-
-        const afterToolCallEvent = new AfterToolCallEvent({
-          agent: this,
-          toolUse,
-          tool,
-          result: toolResult,
-        })
-        yield afterToolCallEvent
-
-        return toolResult
-      }
+      yield new BeforeToolCallEvent({ agent: this, toolUse, tool })
 
       // Start tool span within loop span context
       const toolSpan = this._tracer.startToolCallSpan({
@@ -949,7 +818,7 @@ export class Agent implements AgentData {
           content: [new TextBlock(`Tool '${toolUseBlock.name}' not found in registry`)],
         })
       } else {
-        // Execute tool and collect result
+        // Execute tool within the tool span context
         const toolContext: ToolContext = {
           toolUse: {
             name: toolUseBlock.name,
@@ -960,15 +829,21 @@ export class Agent implements AgentData {
         }
 
         try {
-          const toolGenerator = tool.stream(toolContext)
-          let toolNext = await toolGenerator.next()
+          // Manually iterate tool stream to wrap each ToolStreamEvent in ToolStreamUpdateEvent.
+          // This keeps the tool authoring interface unchanged — tools construct ToolStreamEvent
+          // without knowledge of agents or hooks, and we wrap at the boundary.
+          // Tool execution is ran within the tool span's context so that
+          // downstream calls (e.g., MCP clients) can propagate trace context
+          const toolGenerator = this._tracer.withSpanContext(toolSpan, () => tool.stream(toolContext))
+          let toolNext = await this._tracer.withSpanContext(toolSpan, () => toolGenerator.next())
           while (!toolNext.done) {
             yield new ToolStreamUpdateEvent({ agent: this, event: toolNext.value })
-            toolNext = await toolGenerator.next()
+            toolNext = await this._tracer.withSpanContext(toolSpan, () => toolGenerator.next())
           }
           const result = toolNext.value
 
           if (!result) {
+            // Tool didn't return a result
             toolResult = new ToolResultBlock({
               toolUseId: toolUseBlock.toolUseId,
               status: 'error',
@@ -979,6 +854,7 @@ export class Agent implements AgentData {
             error = result.error
           }
         } catch (e) {
+          // Tool execution failed with error
           error = normalizeError(e)
           toolResult = new ToolResultBlock({
             toolUseId: toolUseBlock.toolUseId,
@@ -1054,44 +930,25 @@ export class Agent implements AgentData {
 }
 
 /**
- * Type guard for ToolProvider interface.
- *
- * @param item - The item to check.
- * @returns True if the item implements ToolProvider.
- */
-function isToolProvider(item: unknown): item is ToolProvider {
-  return (
-    typeof item === 'object' &&
-    item !== null &&
-    'listTools' in item &&
-    typeof (item as ToolProvider).listTools === 'function'
-  )
-}
-
-/**
  * Recursively flattens nested arrays of tools into a single flat array.
  * @param tools - Tools or nested arrays of tools
- * @returns Flat array of tools, MCP clients, and tool providers
+ * @returns Flat array of tools and MCP clients
  */
-function flattenTools(toolList: ToolList): { tools: Tool[]; mcpClients: McpClient[]; toolProviders: ToolProvider[] } {
+function flattenTools(toolList: ToolList): { tools: Tool[]; mcpClients: McpClient[] } {
   const tools: Tool[] = []
   const mcpClients: McpClient[] = []
-  const toolProviders: ToolProvider[] = []
 
   for (const item of toolList) {
     if (Array.isArray(item)) {
-      const nested = flattenTools(item)
-      tools.push(...nested.tools)
-      mcpClients.push(...nested.mcpClients)
-      toolProviders.push(...nested.toolProviders)
+      const { tools: nestedTools, mcpClients: nestedMcpClients } = flattenTools(item)
+      tools.push(...nestedTools)
+      mcpClients.push(...nestedMcpClients)
     } else if (item instanceof McpClient) {
       mcpClients.push(item)
-    } else if (isToolProvider(item)) {
-      toolProviders.push(item)
     } else {
       tools.push(item)
     }
   }
 
-  return { tools, mcpClients, toolProviders }
+  return { tools, mcpClients }
 }

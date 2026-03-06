@@ -8,8 +8,8 @@
 // Agent class
 export { Agent } from './agent/agent.js'
 
-// Agent state type (not constructor - internal implementation)
-export type { AgentState } from './agent/state.js'
+// App state
+export { AppState } from './app-state.js'
 
 // Agent types
 export type { AgentData } from './types/agent.js'
@@ -66,6 +66,18 @@ export {
   contentBlockFromData,
 } from './types/messages.js'
 
+// Citation types
+export type {
+  CitationsBlockData,
+  Citation,
+  CitationLocation,
+  CitationSourceContent,
+  CitationGeneratedContent,
+} from './types/citations.js'
+
+// Citation class
+export { CitationsBlock } from './types/citations.js'
+
 // Media classes
 export { S3Location, ImageBlock, VideoBlock, DocumentBlock } from './types/media.js'
 
@@ -90,18 +102,6 @@ export type {
 
 // Document types
 export type { CitationsConfig } from './types/documents.js'
-
-// Citation types
-export type {
-  CitationLocation,
-  CitationSourceContent,
-  CitationGeneratedContent,
-  Citation,
-  CitationsContentBlockData,
-} from './types/citations.js'
-
-// Citation classes
-export { CitationsContentBlock } from './types/citations.js'
 
 // Tool types
 export type { ToolSpec, ToolUse, ToolResultStatus, ToolChoice } from './tools/types.js'
@@ -137,6 +137,7 @@ export type {
   TextDelta,
   ToolUseInputDelta,
   ReasoningContentDelta,
+  CitationsDelta,
   ContentBlockDelta,
   ModelContentBlockDeltaEventData,
   ModelContentBlockDeltaEvent,
