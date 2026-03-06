@@ -158,6 +158,10 @@ export interface InvokeOptions {
    * Zod schema for structured output validation, overriding the constructor-provided schema for this invocation only.
    */
   structuredOutputSchema?: z.ZodSchema
+  /**
+   * AbortSignal to cancel the invocation.
+   */
+  signal?: AbortSignal
 }
 
 /** Fallback name used when no agent name is provided in the config. */
@@ -513,7 +517,7 @@ export class Agent implements AgentData {
         })
 
         try {
-          const modelResult = yield* this.invokeModel(currentArgs, forcedToolChoice)
+          const modelResult = yield* this.invokeModel(currentArgs, forcedToolChoice, options?.signal)
           currentArgs = undefined // Only pass args on first invocation
           const wasForced = forcedToolChoice !== undefined
           forcedToolChoice = undefined // Clear after use
@@ -670,7 +674,8 @@ export class Agent implements AgentData {
    */
   private async *invokeModel(
     args?: InvokeArgs,
-    forcedToolChoice?: ToolChoice
+    forcedToolChoice?: ToolChoice,
+    signal?: AbortSignal
   ): AsyncGenerator<AgentStreamEvent, { message: Message; stopReason: StopReason }, undefined> {
     // Normalize input and append messages to conversation
     const messagesToAppend = this._normalizeInput(args)
@@ -687,6 +692,11 @@ export class Agent implements AgentData {
     // Add tool choice if provided (for structured output forcing)
     if (forcedToolChoice) {
       streamOptions.toolChoice = forcedToolChoice
+    }
+
+    // Pass abort signal through to model
+    if (signal) {
+      streamOptions.signal = signal
     }
 
     yield new BeforeModelCallEvent({ agent: this })
