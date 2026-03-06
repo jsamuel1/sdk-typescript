@@ -18,8 +18,8 @@ import { Edge } from './edge.js'
 import type { EdgeDefinition } from './edge.js'
 import { MultiAgentHandoffEvent, MultiAgentResultEvent } from './events.js'
 import type { MultiAgentStreamEvent } from './events.js'
-import { Node, AgentNode } from './nodes.js'
-import type { NodeDefinition } from './nodes.js'
+import { Node, AgentNode, MultiAgentNode } from './nodes.js'
+import type { NodeDefinition, AgentNodeOptions, MultiAgentNodeOptions } from './nodes.js'
 import { Queue } from './queue.js'
 import { MultiAgentState, MultiAgentResult, Status } from './state.js'
 
@@ -86,7 +86,12 @@ export class Graph {
     // Resolve node definitions to Node instances
     this._nodes = new Map()
     for (const def of options.nodes) {
-      const node = def instanceof Node ? def : new AgentNode(def)
+      const node =
+        def instanceof Node
+          ? def
+          : def.type === 'multiAgent'
+            ? new MultiAgentNode(def as MultiAgentNodeOptions)
+            : new AgentNode(def as AgentNodeOptions)
       if (this._nodes.has(node.id)) {
         throw new GraphError(`Duplicate node ID: '${node.id}'`)
       }
@@ -234,6 +239,7 @@ export class Graph {
       // Run node in background, pushing events to queue
       this._runNodeToQueue(node, input, state, queue).then(() => {
         activeCount--
+        queue.notify()
       })
     }
 
@@ -241,8 +247,9 @@ export class Graph {
     while (activeCount > 0 || queue.size > 0) {
       await queue.wait()
 
-      let item = queue.shift()
-      while (item) {
+      let entry = queue.shift()
+      while (entry) {
+        const item = entry.data
         if (item.type === 'event') {
           yield item.event
         } else if (item.type === 'result') {
@@ -258,7 +265,8 @@ export class Graph {
         } else if (item.type === 'error') {
           throw item.error
         }
-        item = queue.shift()
+        entry.ack()
+        entry = queue.shift()
       }
     }
   }

@@ -19,6 +19,8 @@ import { type Tool, type ToolContext } from '../tools/tool.js'
 import type { ToolChoice } from '../tools/types.js'
 import { systemPromptFromData } from '../types/messages.js'
 import { normalizeError, ConcurrentInvocationError, MaxTokensError } from '../errors.js'
+import { _InterruptState, InterruptException } from '../interrupt.js'
+import type { InterruptResponseContent } from '../interrupt.js'
 import { Model } from '../models/model.js'
 import type { BaseModelConfig, StreamOptions } from '../models/model.js'
 import { isModelStreamEvent } from '../models/streaming.js'
@@ -47,6 +49,7 @@ import {
   ToolResultEvent,
   AgentResultEvent,
   ToolStreamUpdateEvent,
+  InterruptEvent,
 } from '../hooks/events.js'
 import { createStructuredOutputContext } from '../structured-output/context.js'
 import { StructuredOutputException } from '../structured-output/exceptions.js'
@@ -218,6 +221,8 @@ export class Agent implements AgentData {
   private _tracer: Tracer
   /** Running total of token usage across all model invocations in the current invocation. */
   private _accumulatedTokenUsage: Usage = Agent._createEmptyUsage()
+  /** Interrupt state for human-in-the-loop workflows. */
+  private _interruptState: _InterruptState = new _InterruptState()
 
   /**
    * Creates an instance of the Agent.
@@ -343,6 +348,17 @@ export class Agent implements AgentData {
   }
 
   /**
+   * Resume the agent after an interrupt by providing responses.
+   *
+   * @param responses - Array of interrupt responses matching the interrupt IDs
+   * @returns Promise that resolves to the final AgentResult
+   */
+  public async resumeFromInterrupt(responses: InterruptResponseContent[]): Promise<AgentResult> {
+    this._interruptState.resume(responses)
+    return this.invoke(undefined as unknown as InvokeArgs)
+  }
+
+  /**
    * Streams the agent execution, yielding events and returning the final result.
    *
    * The agent loop manages the conversation flow by:
@@ -380,31 +396,68 @@ export class Agent implements AgentData {
 
     await this.initialize()
 
+    // Activate interrupt state for this invocation
+    this._interruptState.activate()
+
     // Delegate to _stream and process events through printer and hooks
     const streamGenerator = this._stream(args, options)
     let result = await streamGenerator.next()
 
-    while (!result.done) {
-      const event = result.value
+    try {
+      while (!result.done) {
+        const event = result.value
 
-      // Invoke hook callbacks for hookable events (all current events are hookable;
-      // the guard exists for future StreamEvent subclasses that may not be)
-      if (event instanceof HookableEvent) {
-        await this.hooks.invokeCallbacks(event)
+        // Attach interrupt state to BeforeToolCallEvent so hooks can call event.interrupt()
+        if (event instanceof BeforeToolCallEvent) {
+          event._interruptState = this._interruptState
+        }
+
+        // Invoke hook callbacks for hookable events (all current events are hookable;
+        // the guard exists for future StreamEvent subclasses that may not be)
+        if (event instanceof HookableEvent) {
+          await this.hooks.invokeCallbacks(event)
+        }
+
+        this._printer?.processEvent(event)
+        yield event
+        result = await streamGenerator.next()
       }
 
-      this._printer?.processEvent(event)
-      yield event
-      result = await streamGenerator.next()
+      // Yield final result as last event
+      const agentResultEvent = new AgentResultEvent({ agent: this, result: result.value })
+      await this.hooks.invokeCallbacks(agentResultEvent)
+      this._printer?.processEvent(agentResultEvent)
+      yield agentResultEvent
+
+      return result.value
+    } catch (error) {
+      if (error instanceof InterruptException) {
+        // Collect all interrupts from the state
+        const interrupts = [...this._interruptState.interrupts.values()]
+
+        const interruptEvent = new InterruptEvent({ agent: this, interrupts })
+        await this.hooks.invokeCallbacks(interruptEvent)
+        this._printer?.processEvent(interruptEvent)
+        yield interruptEvent
+
+        // Build a minimal last message for the result
+        const lastMessage = this.messages.length > 0 ? this.messages[this.messages.length - 1]! : new Message({ role: 'assistant', content: [new TextBlock('Interrupted')] })
+
+        const interruptResult = new AgentResult({
+          stopReason: 'interrupt',
+          lastMessage,
+          interrupts,
+        })
+
+        const agentResultEvent = new AgentResultEvent({ agent: this, result: interruptResult })
+        await this.hooks.invokeCallbacks(agentResultEvent)
+        this._printer?.processEvent(agentResultEvent)
+        yield agentResultEvent
+
+        return interruptResult
+      }
+      throw error
     }
-
-    // Yield final result as last event
-    const agentResultEvent = new AgentResultEvent({ agent: this, result: result.value })
-    await this.hooks.invokeCallbacks(agentResultEvent)
-    this._printer?.processEvent(agentResultEvent)
-    yield agentResultEvent
-
-    return result.value
   }
 
   /**
