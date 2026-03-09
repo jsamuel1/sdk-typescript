@@ -85,17 +85,6 @@ export interface GraphOptions extends GraphConfig {
 }
 
 /**
- * Extended result metadata from graph execution.
- */
-export interface GraphResult {
-  result: MultiAgentResult
-  executionOrder: string[]
-  totalNodes: number
-  completedNodes: number
-  failedNodes: number
-}
-
-/**
  * Directed graph multi-agent orchestration.
  *
  * Execution:
@@ -231,34 +220,11 @@ export class Graph implements MultiAgentBase {
   /**
    * Invoke the graph and return extended result metadata.
    */
-  async invokeWithDetails(task: InvokeArgs, signal?: AbortSignal): Promise<GraphResult> {
-    const gen = this._streamWithDetails(task, signal)
-    let last: IteratorResult<MultiAgentStreamEvent, GraphResult>
-    do {
-      last = await gen.next()
-    } while (!last.done)
-    return last.value
-  }
-
   private async *_stream(
     task: InvokeArgs,
     signal?: AbortSignal
   ): AsyncGenerator<MultiAgentStreamEvent, MultiAgentResult, undefined> {
-    const gen = this._streamWithDetails(task, signal)
-    let next = await gen.next()
-    while (!next.done) {
-      yield next.value
-      next = await gen.next()
-    }
-    return next.value.result
-  }
-
-  private async *_streamWithDetails(
-    task: InvokeArgs,
-    signal?: AbortSignal
-  ): AsyncGenerator<MultiAgentStreamEvent, GraphResult, undefined> {
     const state = new MultiAgentState({ nodeIds: [...this._nodes.keys()] })
-    const executionOrder: string[] = []
 
     yield new BeforeMultiAgentInvocationEvent({ orchestrator: this, state })
 
@@ -277,7 +243,7 @@ export class Graph implements MultiAgentBase {
         const currentBatch = readyIds
         readyIds = []
 
-        yield* this._executeBatch(currentBatch, task, state, executionOrder, signal)
+        yield* this._executeBatch(currentBatch, task, state, signal)
 
         const newlyReady = this._findNewlyReady(currentBatch, state)
 
@@ -303,13 +269,7 @@ export class Graph implements MultiAgentBase {
 
     yield new MultiAgentResultEvent({ result })
 
-    return {
-      result,
-      executionOrder,
-      totalNodes: this._nodes.size,
-      completedNodes: state.results.filter((r) => r.status === Status.COMPLETED).length,
-      failedNodes: state.results.filter((r) => r.status === Status.FAILED).length,
-    }
+    return result
   }
 
   /**
@@ -319,7 +279,6 @@ export class Graph implements MultiAgentBase {
     nodeIds: string[],
     task: InvokeArgs,
     state: MultiAgentState,
-    executionOrder: string[],
     signal?: AbortSignal
   ): AsyncGenerator<MultiAgentStreamEvent, void, undefined> {
     const queue = new Queue()
@@ -356,9 +315,6 @@ export class Graph implements MultiAgentBase {
           if (nodeState) {
             nodeState.status = item.result.status
             nodeState.results.push(item.result)
-            if (item.result.status === Status.COMPLETED) {
-              executionOrder.push(item.node.id)
-            }
           }
           state.results.push(item.result)
         } else if (item.type === 'error') {
