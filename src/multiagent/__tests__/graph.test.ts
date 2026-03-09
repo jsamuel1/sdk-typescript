@@ -6,13 +6,9 @@ import { TextBlock } from '../../types/messages.js'
 import { AgentNode } from '../nodes.js'
 import { Graph } from '../graph.js'
 
-function makeAgent(reply: string): Agent {
-  const model = new MockMessageModel().addTurn(new TextBlock(reply))
-  return new Agent({ model, printer: false })
-}
-
 function makeNode(id: string, reply: string): AgentNode {
-  return new AgentNode({ id, agent: makeAgent(reply) })
+  const model = new MockMessageModel().addTurn(new TextBlock(reply))
+  return new AgentNode({ agent: new Agent({ model, printer: false, agentId: id }) })
 }
 
 describe('Graph', () => {
@@ -245,9 +241,9 @@ describe('Graph', () => {
   describe('error handling', () => {
     it('propagates node execution errors', async () => {
       const model = new MockMessageModel().addTurn(new Error('boom'))
-      const failAgent = new Agent({ model, printer: false })
+      const failAgent = new Agent({ model, printer: false, agentId: 'fail' })
       const graph = new Graph({
-        nodes: [new AgentNode({ id: 'fail', agent: failAgent })],
+        nodes: [new AgentNode({ agent: failAgent })],
         edges: [],
       })
 

@@ -18,6 +18,7 @@ export {
   AfterNodeCallEvent,
   NodeStreamUpdateEvent,
   NodeResultEvent,
+  NodeCancelEvent,
   MultiAgentHandoffEvent,
   MultiAgentResultEvent,
 } from './events.js'

@@ -34,6 +34,10 @@
       "types": "./dist/src/a2a/index.d.ts",
       "default": "./dist/src/a2a/index.js"
     },
+    "./multiagent": {
+      "types": "./dist/src/multiagent/index.d.ts",
+      "default": "./dist/src/multiagent/index.js"
+    },
     "./vended_tools/notebook": {
       "types": "./dist/src/vended-tools/notebook/index.d.ts",
       "default": "./dist/src/vended-tools/notebook/index.js"
@@ -53,7 +57,8 @@
   },
   "scripts": {
     "build": "tsc --project src/tsconfig.json",
-    "check": "npm run lint && npm run format && npm run type-check && npm run test:coverage && npm run test:package",
+    "check": "npm run lint && npm run format && npm run type-check && npm run check:browser-bundle && npm run test:coverage && npm run test:package",
+    "check:browser-bundle": "esbuild src/index.ts --bundle --platform=browser --format=esm --packages=external --outfile=/dev/null",
     "clean": "rm -rf node_modules dist package-lock.json",
     "test": "vitest run --project unit-node",
     "test:watch": "vitest --project unit-node",
@@ -164,6 +169,9 @@
       "optional": true
     },
     "express": {
+      "optional": true
+    },
+    "@opentelemetry/sdk-trace-node": {
       "optional": true
     }
   },

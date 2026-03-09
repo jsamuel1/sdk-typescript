@@ -140,6 +140,10 @@ export type AgentConfig = {
    */
   name?: string
   /**
+   * Optional description of what the agent does.
+   */
+  description?: string
+  /**
    * Optional unique identifier for the agent. Defaults to "default".
    */
   agentId?: string
@@ -220,6 +224,11 @@ export class Agent implements AgentData {
    */
   public readonly agentId: string
 
+  /**
+   * Optional description of what the agent does.
+   */
+  public readonly description?: string
+
   private _toolRegistry: ToolRegistry
   private _mcpClients: McpClient[]
   private _initialized: boolean
@@ -244,6 +253,7 @@ export class Agent implements AgentData {
     this.conversationManager = config?.conversationManager ?? new SlidingWindowConversationManager({ windowSize: 40 })
     this.name = config?.name ?? DEFAULT_AGENT_NAME
     this.agentId = config?.agentId ?? DEFAULT_AGENT_ID
+    if (config?.description !== undefined) this.description = config.description
 
     // Initialize hooks and register conversation manager hooks
     this.hooks = new HookRegistryImplementation()
@@ -454,7 +464,10 @@ export class Agent implements AgentData {
         yield interruptEvent
 
         // Build a minimal last message for the result
-        const lastMessage = this.messages.length > 0 ? this.messages[this.messages.length - 1]! : new Message({ role: 'assistant', content: [new TextBlock('Interrupted')] })
+        const lastMessage =
+          this.messages.length > 0
+            ? this.messages[this.messages.length - 1]!
+            : new Message({ role: 'assistant', content: [new TextBlock('Interrupted')] })
 
         const interruptResult = new AgentResult({
           stopReason: 'interrupt',
