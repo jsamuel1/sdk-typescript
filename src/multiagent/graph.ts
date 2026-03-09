@@ -11,16 +11,37 @@
  * - Conditional edges with optional handler functions
  * - Cycle support with configurable execution limits
  * - Reset-on-revisit for stateless node behavior
+ *
+ * @example
+ * ```typescript
+ * const graph = new Graph({
+ *   nodes: [researcher, writer],
+ *   edges: [{ source: 'researcher', target: 'writer' }],
+ *   maxNodeExecutions: 10,
+ * })
+ *
+ * const result = await graph.invoke('Explain quantum computing')
+ * ```
  */
 
 import type { InvokeArgs } from '../agent/agent.js'
 import { Edge } from './edge.js'
 import type { EdgeDefinition } from './edge.js'
-import { MultiAgentHandoffEvent, MultiAgentResultEvent } from './events.js'
+import {
+  BeforeMultiAgentInvocationEvent,
+  AfterMultiAgentInvocationEvent,
+  MultiAgentHandoffEvent,
+  MultiAgentInitializedEvent,
+  MultiAgentResultEvent,
+} from './events.js'
 import type { MultiAgentStreamEvent } from './events.js'
+import { HookableEvent } from '../hooks/events.js'
+import { HookRegistryImplementation } from '../hooks/registry.js'
+import type { HookProvider } from '../hooks/types.js'
 import { Node, AgentNode, MultiAgentNode } from './nodes.js'
 import type { NodeDefinition, AgentNodeOptions, MultiAgentNodeOptions } from './nodes.js'
 import { Queue } from './queue.js'
+import type { MultiAgentBase } from './base.js'
 import { MultiAgentState, MultiAgentResult, Status } from './state.js'
 
 /**
@@ -34,27 +55,37 @@ export class GraphError extends Error {
 }
 
 /**
- * Configuration for creating a Graph.
+ * Runtime configuration for graph execution.
  */
-export interface GraphOptions {
+export interface GraphConfig {
+  /** Maximum total node executions before stopping. Defaults to Infinity. */
+  maxNodeExecutions?: number
+  /** Total execution timeout in milliseconds. Defaults to Infinity. */
+  executionTimeout?: number
+  /** Individual node execution timeout in milliseconds. Defaults to Infinity. */
+  nodeTimeout?: number
+  /** Whether to reset node state when revisited in cycles. Defaults to false. */
+  resetOnRevisit?: boolean
+}
+
+/**
+ * Options for creating a Graph instance.
+ */
+export interface GraphOptions extends GraphConfig {
+  /** Unique identifier. Defaults to `'graph'`. */
+  id?: string
   /** Node definitions — either Node instances or AgentNodeOptions. */
   nodes: NodeDefinition[]
   /** Edge definitions connecting nodes. */
   edges: EdgeDefinition[]
   /** IDs of entry point nodes. Auto-detected if omitted (nodes with no incoming edges). */
   entryPoints?: string[]
-  /** Maximum total node executions before stopping. */
-  maxNodeExecutions?: number
-  /** Total execution timeout in milliseconds. */
-  executionTimeout?: number
-  /** Individual node execution timeout in milliseconds. */
-  nodeTimeout?: number
-  /** Whether to reset node state when revisited in cycles. */
-  resetOnRevisit?: boolean
+  /** Hook providers for event-driven extensibility. */
+  hooks?: HookProvider[]
 }
 
 /**
- * Extended result from graph execution.
+ * Extended result metadata from graph execution.
  */
 export interface GraphResult {
   result: MultiAgentResult
@@ -73,19 +104,31 @@ export interface GraphResult {
  * 3. After a batch completes, find newly ready nodes (all dependencies satisfied)
  * 4. Repeat until no more nodes are ready or limits are exceeded
  */
-export class Graph {
+export class Graph implements MultiAgentBase {
+  readonly id: string
+  readonly config: Required<GraphConfig>
+  readonly hooks: HookRegistryImplementation
   private readonly _nodes: Map<string, Node>
   private readonly _edges: Edge[]
   private readonly _entryPoints: string[]
-  private readonly _maxNodeExecutions: number
-  private readonly _executionTimeout: number
-  private readonly _nodeTimeout: number
-  private readonly _resetOnRevisit: boolean
+  private _initialized: boolean
 
   constructor(options: GraphOptions) {
+    const { id, nodes, edges, entryPoints, hooks, ...config } = options
+
+    this.id = id ?? 'graph'
+
+    this.config = {
+      maxNodeExecutions: Infinity,
+      executionTimeout: Infinity,
+      nodeTimeout: Infinity,
+      resetOnRevisit: false,
+      ...config,
+    }
+
     // Resolve node definitions to Node instances
     this._nodes = new Map()
-    for (const def of options.nodes) {
+    for (const def of nodes) {
       const node =
         def instanceof Node
           ? def
@@ -103,7 +146,7 @@ export class Graph {
     }
 
     // Resolve edge definitions
-    this._edges = options.edges.map((def) => {
+    this._edges = edges.map((def) => {
       const source = this._nodes.get(def.source)
       const target = this._nodes.get(def.target)
       if (!source) throw new GraphError(`Edge source '${def.source}' not found`)
@@ -112,24 +155,22 @@ export class Graph {
     })
 
     // Resolve entry points
-    if (options.entryPoints) {
-      for (const id of options.entryPoints) {
-        if (!this._nodes.has(id)) throw new GraphError(`Entry point '${id}' not found`)
+    if (entryPoints) {
+      for (const ep of entryPoints) {
+        if (!this._nodes.has(ep)) throw new GraphError(`Entry point '${ep}' not found`)
       }
-      this._entryPoints = options.entryPoints
+      this._entryPoints = entryPoints
     } else {
-      // Auto-detect: nodes with no incoming edges
       const targets = new Set(this._edges.map((e) => e.target.id))
-      this._entryPoints = [...this._nodes.keys()].filter((id) => !targets.has(id))
+      this._entryPoints = [...this._nodes.keys()].filter((nid) => !targets.has(nid))
       if (this._entryPoints.length === 0) {
         throw new GraphError('No entry points found — all nodes have incoming edges')
       }
     }
 
-    this._maxNodeExecutions = options.maxNodeExecutions ?? Infinity
-    this._executionTimeout = options.executionTimeout ?? Infinity
-    this._nodeTimeout = options.nodeTimeout ?? Infinity
-    this._resetOnRevisit = options.resetOnRevisit ?? false
+    this.hooks = new HookRegistryImplementation()
+    this.hooks.addAllHooks(hooks ?? [])
+    this._initialized = false
   }
 
   get nodes(): ReadonlyMap<string, Node> {
@@ -145,10 +186,50 @@ export class Graph {
   }
 
   /**
+   * Initialize the graph. Invokes the {@link MultiAgentInitializedEvent} callback.
+   * Called automatically on first invocation.
+   */
+  async initialize(): Promise<void> {
+    if (this._initialized) return
+    await this.hooks.invokeCallbacks(new MultiAgentInitializedEvent({ orchestrator: this }))
+    this._initialized = true
+  }
+
+  /**
    * Invoke the graph and return the final result.
    */
-  async invoke(task: InvokeArgs): Promise<GraphResult> {
+  async invoke(task: InvokeArgs): Promise<MultiAgentResult> {
     const gen = this.stream(task)
+    let next = await gen.next()
+    while (!next.done) {
+      next = await gen.next()
+    }
+    return next.value
+  }
+
+  /**
+   * Stream events during graph execution.
+   */
+  async *stream(task: InvokeArgs): AsyncGenerator<MultiAgentStreamEvent, MultiAgentResult, undefined> {
+    await this.initialize()
+
+    const gen = this._stream(task)
+    let next = await gen.next()
+    while (!next.done) {
+      if (next.value instanceof HookableEvent) {
+        await this.hooks.invokeCallbacks(next.value)
+      }
+      yield next.value
+      next = await gen.next()
+    }
+    return next.value
+  }
+
+  /**
+   * Invoke the graph and return extended result metadata.
+   */
+  async invokeWithDetails(task: InvokeArgs): Promise<GraphResult> {
+    const gen = this._streamWithDetails(task)
     let last: IteratorResult<MultiAgentStreamEvent, GraphResult>
     do {
       last = await gen.next()
@@ -156,56 +237,66 @@ export class Graph {
     return last.value
   }
 
-  /**
-   * Stream events during graph execution.
-   */
-  async *stream(task: InvokeArgs): AsyncGenerator<MultiAgentStreamEvent, GraphResult, undefined> {
-    const startTime = Date.now()
+  private async *_stream(task: InvokeArgs): AsyncGenerator<MultiAgentStreamEvent, MultiAgentResult, undefined> {
+    const gen = this._streamWithDetails(task)
+    let next = await gen.next()
+    while (!next.done) {
+      yield next.value
+      next = await gen.next()
+    }
+    return next.value.result
+  }
+
+  private async *_streamWithDetails(task: InvokeArgs): AsyncGenerator<MultiAgentStreamEvent, GraphResult, undefined> {
     const state = new MultiAgentState({ nodeIds: [...this._nodes.keys()] })
     const executionOrder: string[] = []
 
-    let readyIds = [...this._entryPoints]
+    yield new BeforeMultiAgentInvocationEvent({ orchestrator: this, state })
 
-    while (readyIds.length > 0) {
-      // Check execution limits
-      if (state.steps >= this._maxNodeExecutions) {
-        throw new GraphError(`Max node executions reached: ${this._maxNodeExecutions}`)
+    try {
+      let readyIds = [...this._entryPoints]
+
+      while (readyIds.length > 0) {
+        if (state.steps >= this.config.maxNodeExecutions) {
+          throw new GraphError(`Max node executions reached: ${this.config.maxNodeExecutions}`)
+        }
+        if (Date.now() - state.startTime >= this.config.executionTimeout) {
+          throw new GraphError(`Execution timed out after ${this.config.executionTimeout}ms`)
+        }
+
+        const currentBatch = readyIds
+        readyIds = []
+
+        yield* this._executeBatch(currentBatch, task, state, executionOrder)
+
+        const newlyReady = this._findNewlyReady(currentBatch, state)
+
+        if (newlyReady.length > 0) {
+          yield new MultiAgentHandoffEvent({
+            source: currentBatch[currentBatch.length - 1]!,
+            targets: newlyReady,
+          })
+        }
+
+        readyIds = newlyReady
       }
-      if (Date.now() - startTime >= this._executionTimeout) {
-        throw new GraphError(`Execution timed out after ${this._executionTimeout}ms`)
-      }
-
-      const currentBatch = readyIds
-      readyIds = []
-
-      // Execute batch — parallel if multiple nodes, yielding events as they arrive
-      yield* this._executeBatch(currentBatch, task, state, executionOrder)
-
-      // Find newly ready nodes
-      const newlyReady = this._findNewlyReady(currentBatch, state)
-
-      if (newlyReady.length > 0) {
-        yield new MultiAgentHandoffEvent({
-          source: currentBatch[currentBatch.length - 1]!,
-          targets: newlyReady,
-        })
-      }
-
-      readyIds = newlyReady
+    } finally {
+      yield new AfterMultiAgentInvocationEvent({ orchestrator: this, state })
     }
 
-    const duration = Date.now() - startTime
-    const allResults = state.results
-    const multiAgentResult = new MultiAgentResult({ results: allResults, duration })
+    const result = new MultiAgentResult({
+      results: state.results,
+      duration: Date.now() - state.startTime,
+    })
 
-    yield new MultiAgentResultEvent({ result: multiAgentResult })
+    yield new MultiAgentResultEvent({ result })
 
     return {
-      result: multiAgentResult,
+      result,
       executionOrder,
       totalNodes: this._nodes.size,
-      completedNodes: allResults.filter((r) => r.status === Status.COMPLETED).length,
-      failedNodes: allResults.filter((r) => r.status === Status.FAILED).length,
+      completedNodes: state.results.filter((r) => r.status === Status.COMPLETED).length,
+      failedNodes: state.results.filter((r) => r.status === Status.FAILED).length,
     }
   }
 
@@ -221,29 +312,24 @@ export class Graph {
     const queue = new Queue()
     let activeCount = nodeIds.length
 
-    // Start all nodes concurrently
     for (const nodeId of nodeIds) {
       const node = this._nodes.get(nodeId)!
       const nodeState = state.node(nodeId)
 
-      // Reset if revisiting
-      if (this._resetOnRevisit && nodeState && nodeState.results.length > 0) {
+      if (this.config.resetOnRevisit && nodeState && nodeState.results.length > 0) {
         nodeState.status = Status.PENDING
       }
 
       state.steps++
 
-      // Build input for this node
       const input = this._buildNodeInput(nodeId, task, state)
 
-      // Run node in background, pushing events to queue
       this._runNodeToQueue(node, input, state, queue).then(() => {
         activeCount--
         queue.notify()
       })
     }
 
-    // Consume events from queue until all nodes complete
     while (activeCount > 0 || queue.size > 0) {
       await queue.wait()
 
@@ -271,9 +357,6 @@ export class Graph {
     }
   }
 
-  /**
-   * Run a single node and push all events/results to the shared queue.
-   */
   private async _runNodeToQueue(node: Node, input: InvokeArgs, state: MultiAgentState, queue: Queue): Promise<void> {
     try {
       const gen = node.stream(input, state)
@@ -288,22 +371,16 @@ export class Graph {
     }
   }
 
-  /**
-   * Build input for a node based on its dependencies' outputs.
-   */
   private _buildNodeInput(nodeId: string, task: InvokeArgs, state: MultiAgentState): InvokeArgs {
-    // Get completed dependency outputs via incoming edges
     const incomingEdges = this._edges.filter((e) => e.target.id === nodeId)
     const depContents = incomingEdges
       .filter((e) => state.node(e.source.id)?.status === Status.COMPLETED)
       .flatMap((e) => state.node(e.source.id)?.content ?? [])
 
     if (depContents.length === 0) {
-      // Entry point or no completed deps — use original task
       return task
     }
 
-    // Combine task text with dependency outputs
     const taskText = typeof task === 'string' ? task : ''
     const depText = depContents
       .filter((b) => b.type === 'textBlock')
@@ -317,24 +394,17 @@ export class Graph {
     return parts.join('\n\n')
   }
 
-  /**
-   * Find nodes that became ready after a batch completed.
-   * A node is ready when all its incoming edge sources are completed
-   * and at least one incoming edge's condition is satisfied from the current batch.
-   */
   private _findNewlyReady(completedBatch: string[], state: MultiAgentState): string[] {
     const completedSet = new Set(completedBatch)
     const ready: string[] = []
 
     for (const [nodeId] of this._nodes) {
       const incoming = this._edges.filter((e) => e.target.id === nodeId)
-      if (incoming.length === 0) continue // entry points, already executed
+      if (incoming.length === 0) continue
 
-      // At least one incoming edge must come from the just-completed batch
       const hasNewlyCompleted = incoming.some((e) => completedSet.has(e.source.id))
       if (!hasNewlyCompleted) continue
 
-      // Check that at least one edge from the completed batch is traversable
       const traversable = incoming.some((e) => completedSet.has(e.source.id) && e.handler(state))
       if (!traversable) continue
 

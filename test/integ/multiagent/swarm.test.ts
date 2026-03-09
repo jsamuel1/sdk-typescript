@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Agent } from '@strands-agents/sdk'
-import { Swarm, SwarmNode } from '$/sdk/multiagent/index.js'
+import { Swarm, Status } from '$/sdk/multiagent/index.js'
 import { collectGenerator } from '$/sdk/__fixtures__/model-test-helpers.js'
 import { bedrock } from '../__fixtures__/model-providers.js'
 
@@ -16,23 +16,29 @@ describe.skipIf(bedrock.skip)('Swarm', () => {
       systemPrompt: 'Answer in one word only.',
     })
 
-    const swarm = new Swarm([new SwarmNode('assistant', agent)], {
-      entryPoint: 'assistant',
+    const swarm = new Swarm({
+      nodes: [agent],
+      start: 'assistant',
     })
 
     const { items, result } = await collectGenerator(swarm.stream('What is the capital of France?'))
 
-    expect(result.state.completed).toBe(true)
-    expect(result.state.nodeHistory).toContain('assistant')
-    expect(result.metrics.durationMs).toBeGreaterThan(0)
+    expect(result.status).toBe(Status.COMPLETED)
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0]!.nodeId).toBe('assistant')
+    expect(result.duration).toBeGreaterThan(0)
 
     const text = result.content.find((b) => b.type === 'textBlock')
     expect(text?.text).toMatch(/Paris/i)
 
     // Verify lifecycle events
     const eventTypes = items.map((e) => e.type)
+    expect(eventTypes[0]).toBe('beforeMultiAgentInvocationEvent')
+    expect(eventTypes).toContain('beforeNodeCallEvent')
     expect(eventTypes).toContain('nodeStreamUpdateEvent')
     expect(eventTypes).toContain('nodeResultEvent')
+    expect(eventTypes).toContain('afterNodeCallEvent')
+    expect(eventTypes).toContain('afterMultiAgentInvocationEvent')
     expect(eventTypes).toContain('multiAgentResultEvent')
   })
 
@@ -54,17 +60,18 @@ describe.skipIf(bedrock.skip)('Swarm', () => {
       systemPrompt: 'Write the final answer in one sentence. Do not hand off to another agent.',
     })
 
-    const swarm = new Swarm([new SwarmNode('researcher', researcher), new SwarmNode('writer', writer)], {
-      entryPoint: 'researcher',
-      maxHandoffs: 4,
+    const swarm = new Swarm({
+      nodes: [researcher, writer],
+      start: 'researcher',
+      maxSteps: 4,
     })
 
     const { items, result } = await collectGenerator(swarm.stream('What is the largest ocean?'))
 
-    expect(result.state.completed).toBe(true)
-    expect(result.state.nodeHistory.length).toBeGreaterThanOrEqual(2)
-    expect(result.state.nodeHistory[0]).toBe('researcher')
-    expect(result.metrics.durationMs).toBeGreaterThan(0)
+    expect(result.status).toBe(Status.COMPLETED)
+    expect(result.results.length).toBeGreaterThanOrEqual(2)
+    expect(result.results[0]!.nodeId).toBe('researcher')
+    expect(result.duration).toBeGreaterThan(0)
 
     const text = result.content.find((b) => b.type === 'textBlock')
     expect(text?.text).toMatch(/Pacific/i)

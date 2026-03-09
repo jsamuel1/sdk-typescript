@@ -12,7 +12,17 @@ function makeNode(id: string, reply: string): AgentNode {
 }
 
 describe('Graph', () => {
-  describe('constructor validation', () => {
+  describe('constructor', () => {
+    it('defaults id to "graph"', () => {
+      const graph = new Graph({ nodes: [makeNode('a', 'hi')], edges: [] })
+      expect(graph.id).toBe('graph')
+    })
+
+    it('accepts a custom id', () => {
+      const graph = new Graph({ nodes: [makeNode('a', 'hi')], edges: [], id: 'my-graph' })
+      expect(graph.id).toBe('my-graph')
+    })
+
     it('throws on empty nodes', () => {
       expect(() => new Graph({ nodes: [], edges: [] })).toThrow('at least one node')
     })
@@ -87,7 +97,7 @@ describe('Graph', () => {
         edges: [],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
       expect(result.completedNodes).toBe(1)
       expect(result.totalNodes).toBe(1)
@@ -100,7 +110,7 @@ describe('Graph', () => {
         edges: [{ source: 'a', target: 'b' }],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
       expect(result.executionOrder).toEqual(['a', 'b'])
       expect(result.completedNodes).toBe(2)
@@ -115,9 +125,25 @@ describe('Graph', () => {
         ],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
       expect(result.executionOrder).toEqual(['a', 'b', 'c'])
+    })
+  })
+
+  describe('invoke (MultiAgentBase)', () => {
+    it('returns MultiAgentResult', async () => {
+      const graph = new Graph({
+        nodes: [makeNode('a', 'hello')],
+        edges: [],
+      })
+
+      const result = await graph.invoke('go')
+
+      expect(result.type).toBe('multiAgentResult')
+      expect(result.results).toHaveLength(1)
+      expect(result.results[0]!.nodeId).toBe('a')
+      expect(result.duration).toBeGreaterThanOrEqual(0)
     })
   })
 
@@ -128,7 +154,7 @@ describe('Graph', () => {
         edges: [],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
       expect(result.completedNodes).toBe(2)
       expect(result.executionOrder).toHaveLength(2)
@@ -145,7 +171,7 @@ describe('Graph', () => {
         ],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
       expect(result.executionOrder[0]).toBe('root')
       expect(result.executionOrder).toContain('left')
@@ -162,9 +188,8 @@ describe('Graph', () => {
         ],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
-      // a and b run first (parallel), then c
       expect(result.executionOrder).toContain('a')
       expect(result.executionOrder).toContain('b')
       expect(result.executionOrder[2]).toBe('c')
@@ -178,7 +203,7 @@ describe('Graph', () => {
         edges: [{ source: 'a', target: 'b', handler: () => false }],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
       expect(result.executionOrder).toEqual(['a'])
       expect(result.completedNodes).toBe(1)
@@ -190,7 +215,7 @@ describe('Graph', () => {
         edges: [{ source: 'a', target: 'b', handler: () => true }],
       })
 
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
 
       expect(result.executionOrder).toEqual(['a', 'b'])
     })
@@ -204,25 +229,25 @@ describe('Graph', () => {
         maxNodeExecutions: 1,
       })
 
-      // a executes (step 1), then b would be step 2 which exceeds limit
       await expect(graph.invoke('go')).rejects.toThrow('Max node executions reached')
     })
   })
 
   describe('streaming', () => {
-    it('yields events during execution', async () => {
+    it('yields lifecycle events during execution', async () => {
       const graph = new Graph({
         nodes: [makeNode('a', 'hello')],
         edges: [],
       })
 
-      const { items, result } = await collectGenerator(graph.stream('go'))
+      const { items } = await collectGenerator(graph.stream('go'))
 
-      // Should have node stream events, result events, and final multiAgentResultEvent
-      expect(items.length).toBeGreaterThan(0)
-      const resultEvents = items.filter((e) => e.type === 'multiAgentResultEvent')
-      expect(resultEvents).toHaveLength(1)
-      expect(result.completedNodes).toBe(1)
+      const eventTypes = items.map((e) => e.type)
+      expect(eventTypes[0]).toBe('beforeMultiAgentInvocationEvent')
+      expect(eventTypes).toContain('nodeStreamUpdateEvent')
+      expect(eventTypes).toContain('nodeResultEvent')
+      expect(eventTypes).toContain('afterMultiAgentInvocationEvent')
+      expect(eventTypes).toContain('multiAgentResultEvent')
     })
 
     it('yields handoff events between batches', async () => {
@@ -247,8 +272,7 @@ describe('Graph', () => {
         edges: [],
       })
 
-      // The node catches the error and returns FAILED status
-      const result = await graph.invoke('go')
+      const result = await graph.invokeWithDetails('go')
       expect(result.failedNodes).toBe(1)
     })
   })
