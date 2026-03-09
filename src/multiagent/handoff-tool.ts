@@ -26,7 +26,7 @@
  */
 
 import { z } from 'zod'
-import { tool } from '../tools/zod-tool.js'
+import { tool } from '../tools/tool-factory.js'
 import type { Agent } from '../agent/agent.js'
 
 import type { InvokableTool } from '../tools/tool.js'
@@ -74,7 +74,8 @@ export function createHandoffTool(
       reason: z.string().describe('Why you are handing off'),
       context: z.record(z.string(), z.unknown()).optional().describe('Additional context to share'),
     }),
-    callback({ agent_name, reason, context }) {
+    callback(input) {
+      const { agent_name, reason, context } = input
       if (!agents.has(agent_name)) {
         return {
           status: 'error',

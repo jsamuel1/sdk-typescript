@@ -1,4 +1,5 @@
 import { tool } from '../../index.js'
+import type { ToolContext } from '../../index.js'
 import { z } from 'zod'
 import type { NotebookState } from './types.js'
 
@@ -65,7 +66,7 @@ export const notebook = tool({
   description:
     'Manages text notebooks for note-taking and documentation. Supports create, list, read, write (replace or insert), and clear operations. Notebooks persist within the agent invocation.',
   inputSchema: notebookInputSchema,
-  callback: (input, context) => {
+  callback: (input: z.infer<typeof notebookInputSchema>, context?: ToolContext) => {
     if (!context) {
       throw new Error('Tool context is required for notebook operations')
     }
