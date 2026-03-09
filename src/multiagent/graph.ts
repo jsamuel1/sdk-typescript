@@ -60,6 +60,8 @@ export class GraphError extends Error {
 export interface GraphConfig {
   /** Maximum total node executions before stopping. Defaults to Infinity. */
   maxNodeExecutions?: number
+  /** Max transitions between node batches. Defaults to Infinity. */
+  maxHandoffs?: number
   /** Total execution timeout in milliseconds. Defaults to Infinity. */
   executionTimeout?: number
   /** Individual node execution timeout in milliseconds. Defaults to Infinity. */
@@ -109,6 +111,7 @@ export class Graph implements MultiAgentBase {
 
     this.config = {
       maxNodeExecutions: Infinity,
+      maxHandoffs: Infinity,
       executionTimeout: Infinity,
       nodeTimeout: Infinity,
       resetOnRevisit: false,
@@ -228,6 +231,8 @@ export class Graph implements MultiAgentBase {
 
     yield new BeforeMultiAgentInvocationEvent({ orchestrator: this, state })
 
+    let handoffCount = 0
+
     try {
       let readyIds = [...this._entryPoints]
 
@@ -248,6 +253,10 @@ export class Graph implements MultiAgentBase {
         const newlyReady = this._findNewlyReady(currentBatch, state)
 
         if (newlyReady.length > 0) {
+          handoffCount++
+          if (handoffCount > this.config.maxHandoffs) {
+            throw new GraphError(`Max handoffs reached: ${this.config.maxHandoffs}`)
+          }
           yield new MultiAgentHandoffEvent({
             source: currentBatch[currentBatch.length - 1]!,
             targets: newlyReady,
