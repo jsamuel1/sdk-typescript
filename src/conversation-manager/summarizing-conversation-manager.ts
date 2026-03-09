@@ -136,7 +136,7 @@ export class SummarizingConversationManager implements HookProvider {
    *
    * @throws ContextWindowOverflowError If the context cannot be summarized.
    */
-  private async reduceContext(agent: Agent): Promise<void> {
+  async reduceContext(agent: Agent): Promise<void> {
     const messagesToSummarizeCount = this.calculateSummarizeCount(agent.messages.length)
 
     if (messagesToSummarizeCount <= 0) {
