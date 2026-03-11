@@ -196,13 +196,10 @@ export {
   AgentResultEvent,
   ModelStreamUpdateEvent,
 } from './hooks/index.js'
-export type {
-  HookCallback,
-  HookProvider,
-  HookableEventConstructor,
-  ModelStopResponse,
-  Redaction,
-} from './hooks/index.js'
+export type { HookCallback, HookableEventConstructor, ModelStopResponse, Redaction } from './hooks/index.js'
+
+// Plugin system
+export { Plugin } from './plugins/index.js'
 
 // Conversation Manager
 export { NullConversationManager } from './conversation-manager/null-conversation-manager.js'

@@ -32,3 +32,5 @@ export type { GraphConfig, GraphOptions } from './graph.js'
 
 export { Swarm } from './swarm.js'
 export type { SwarmConfig, SwarmNodeDefinition, SwarmOptions } from './swarm.js'
+
+export type { MultiAgentPlugin } from './plugins.js'

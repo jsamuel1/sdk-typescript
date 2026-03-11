@@ -4,7 +4,9 @@ import type { InvokeArgs } from '../agent/agent.js'
 import { z } from 'zod'
 import { HookableEvent } from '../hooks/events.js'
 import { HookRegistryImplementation } from '../hooks/registry.js'
-import type { HookProvider } from '../hooks/types.js'
+import type { HookCallback, HookableEventConstructor, HookCleanup } from '../hooks/types.js'
+import type { MultiAgentPlugin } from './plugins.js'
+import { MultiAgentPluginRegistry } from './plugins.js'
 import type { ContentBlock } from '../types/messages.js'
 import { TextBlock } from '../types/messages.js'
 import type { AgentNodeOptions } from './nodes.js'
@@ -62,8 +64,8 @@ export interface SwarmOptions extends SwarmConfig {
   nodes: SwarmNodeDefinition[]
   /** Agent id that receives the initial input. */
   start: string
-  /** Hook providers for event-driven extensibility. */
-  hooks?: HookProvider[]
+  /** Plugins for event-driven extensibility. */
+  plugins?: MultiAgentPlugin[]
 }
 
 /**
@@ -98,13 +100,14 @@ export class Swarm implements MultiAgentBase {
   readonly id: string
   readonly nodes: ReadonlyMap<string, AgentNode>
   readonly config: Required<SwarmConfig>
-  readonly hooks: HookRegistryImplementation
+  private readonly _pluginRegistry: MultiAgentPluginRegistry
+  private readonly _hookRegistry: HookRegistryImplementation
   private readonly _start: AgentNode
   private readonly _handoffSchema: z.ZodType<HandoffResult>
   private _initialized: boolean
 
   constructor(options: SwarmOptions) {
-    const { id, nodes, start, hooks, ...config } = options
+    const { id, nodes, start, plugins, ...config } = options
 
     this.id = id ?? 'swarm'
 
@@ -118,8 +121,8 @@ export class Swarm implements MultiAgentBase {
 
     this._handoffSchema = this._buildHandoffSchema()
 
-    this.hooks = new HookRegistryImplementation()
-    this.hooks.addAllHooks(hooks ?? [])
+    this._hookRegistry = new HookRegistryImplementation()
+    this._pluginRegistry = new MultiAgentPluginRegistry(plugins)
     this._initialized = false
   }
 
@@ -129,8 +132,20 @@ export class Swarm implements MultiAgentBase {
    */
   async initialize(): Promise<void> {
     if (this._initialized) return
-    await this.hooks.invokeCallbacks(new MultiAgentInitializedEvent({ orchestrator: this }))
+    await this._pluginRegistry.initialize(this)
+    await this._hookRegistry.invokeCallbacks(new MultiAgentInitializedEvent({ orchestrator: this }))
     this._initialized = true
+  }
+
+  /**
+   * Register a hook callback for a specific swarm event type.
+   *
+   * @param eventType - The event class constructor to register the callback for
+   * @param callback - The callback function to invoke when the event occurs
+   * @returns Cleanup function that removes the callback when invoked
+   */
+  addHook<T extends HookableEvent>(eventType: HookableEventConstructor<T>, callback: HookCallback<T>): HookCleanup {
+    return this._hookRegistry.addCallback(eventType, callback)
   }
 
   /**
@@ -162,7 +177,7 @@ export class Swarm implements MultiAgentBase {
     let next = await gen.next()
     while (!next.done) {
       if (next.value instanceof HookableEvent) {
-        await this.hooks.invokeCallbacks(next.value)
+        await this._hookRegistry.invokeCallbacks(next.value)
       }
       yield next.value
       next = await gen.next()

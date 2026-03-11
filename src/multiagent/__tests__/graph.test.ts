@@ -372,7 +372,7 @@ describe('Graph', () => {
         edges: [],
       })
 
-      graph.hooks.addCallback(MultiAgentInitializedEvent, () => {
+      graph.addHook(MultiAgentInitializedEvent, () => {
         callCount++
       })
 
@@ -395,11 +395,11 @@ describe('Graph', () => {
         maxConcurrency: 1,
       })
 
-      graph.hooks.addCallback(BeforeNodeCallEvent, () => {
+      graph.addHook(BeforeNodeCallEvent, () => {
         concurrent++
         maxConcurrent = Math.max(maxConcurrent, concurrent)
       })
-      graph.hooks.addCallback(AfterNodeCallEvent, () => {
+      graph.addHook(AfterNodeCallEvent, () => {
         concurrent--
       })
 
@@ -519,7 +519,7 @@ describe('Graph', () => {
         edges: [],
       })
 
-      graph.hooks.addCallback(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
+      graph.addHook(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
         event.cancel = true
       })
 
@@ -539,7 +539,7 @@ describe('Graph', () => {
         edges: [],
       })
 
-      graph.hooks.addCallback(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
+      graph.addHook(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
         event.cancel = 'node not ready'
       })
 

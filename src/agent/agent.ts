@@ -25,9 +25,11 @@ import { ToolRegistry } from '../registry/tool-registry.js'
 import { AppState } from '../app-state.js'
 import type { AgentData } from '../types/agent.js'
 import { AgentPrinter, getDefaultAppender, type Printer } from './printer.js'
-import type { HookProvider } from '../hooks/types.js'
+import { Plugin } from '../plugins/plugin.js'
+import { PluginRegistry } from '../plugins/registry.js'
 import { SlidingWindowConversationManager } from '../conversation-manager/sliding-window-conversation-manager.js'
 import { HookRegistryImplementation } from '../hooks/registry.js'
+import type { HookableEventConstructor, HookCallback, HookCleanup } from '../hooks/types.js'
 import {
   InitializedEvent,
   AfterInvocationEvent,
@@ -113,12 +115,11 @@ export type AgentConfig = {
    * Conversation manager for handling message history and context overflow.
    * Defaults to SlidingWindowConversationManager with windowSize of 40.
    */
-  conversationManager?: HookProvider
+  conversationManager?: Plugin
   /**
-   * Hook providers to register with the agent.
-   * Hooks enable observing and extending agent behavior.
+   * Plugins to register with the agent.
    */
-  hooks?: HookProvider[]
+  plugins?: Plugin[]
   /**
    * Zod schema for structured output validation.
    */
@@ -188,15 +189,7 @@ export class Agent implements AgentData {
    * State is not passed to the model during inference.
    */
   public readonly state: AppState
-  /**
-   * Conversation manager for handling message history and context overflow.
-   */
-  public readonly conversationManager: HookProvider
-  /**
-   * Hook registry for managing event callbacks.
-   * Hooks enable observing and extending agent behavior.
-   */
-  public readonly hooks: HookRegistryImplementation
+  private readonly _conversationManager: Plugin
 
   /**
    * The model provider used by the agent for inference.
@@ -223,6 +216,8 @@ export class Agent implements AgentData {
    */
   public readonly description?: string
 
+  private readonly _hooksRegistry: HookRegistryImplementation
+  private readonly _pluginRegistry: PluginRegistry
   private _toolRegistry: ToolRegistry
   private _mcpClients: McpClient[]
   private _initialized: boolean
@@ -242,15 +237,10 @@ export class Agent implements AgentData {
     // Initialize public fields
     this.messages = (config?.messages ?? []).map((msg) => (msg instanceof Message ? msg : Message.fromMessageData(msg)))
     this.state = new AppState(config?.state)
-    this.conversationManager = config?.conversationManager ?? new SlidingWindowConversationManager({ windowSize: 40 })
+    this._conversationManager = config?.conversationManager ?? new SlidingWindowConversationManager({ windowSize: 40 })
     this.name = config?.name ?? DEFAULT_AGENT_NAME
     this.agentId = config?.agentId ?? DEFAULT_AGENT_ID
     if (config?.description !== undefined) this.description = config.description
-
-    // Initialize hooks and register conversation manager hooks
-    this.hooks = new HookRegistryImplementation()
-    this.hooks.addHook(this.conversationManager)
-    this.hooks.addAllHooks(config?.hooks ?? [])
 
     if (typeof config?.model === 'string') {
       this.model = new BedrockModel({ modelId: config.model })
@@ -261,6 +251,16 @@ export class Agent implements AgentData {
     const { tools, mcpClients } = flattenTools(config?.tools ?? [])
     this._toolRegistry = new ToolRegistry(tools)
     this._mcpClients = mcpClients
+
+    // Initialize hooks registry
+    this._hooksRegistry = new HookRegistryImplementation()
+
+    // Initialize plugin registry with all plugins to be initialized during initialize()
+    this._pluginRegistry = new PluginRegistry([
+      this._conversationManager,
+      ...(config?.plugins ?? []),
+      ...(config?.sessionManager ? [config.sessionManager] : []),
+    ])
 
     if (config?.systemPrompt !== undefined) {
       this.systemPrompt = systemPromptFromData(config.systemPrompt)
@@ -281,11 +281,30 @@ export class Agent implements AgentData {
     // Initialize meter for local metrics accumulation
     this._meter = new Meter()
 
-    if (config?.sessionManager) {
-      this.hooks.addHook(config.sessionManager)
-    }
-
     this._initialized = false
+  }
+
+  /**
+   * Register a hook callback for a specific event type.
+   *
+   * @param eventType - The event class constructor to register the callback for
+   * @param callback - The callback function to invoke when the event occurs
+   * @returns Cleanup function that removes the callback when invoked
+   *
+   * @example
+   * ```typescript
+   * const agent = new Agent({ model })
+   *
+   * const cleanup = agent.addHook(BeforeInvocationEvent, (event) => {
+   *   console.log('Invocation started')
+   * })
+   *
+   * // Later, to remove the hook:
+   * cleanup()
+   * ```
+   */
+  addHook<T extends HookableEvent>(eventType: HookableEventConstructor<T>, callback: HookCallback<T>): HookCleanup {
+    return this._hooksRegistry.addCallback(eventType, callback)
   }
 
   public async initialize(): Promise<void> {
@@ -293,6 +312,7 @@ export class Agent implements AgentData {
       return
     }
 
+    // Initialize MCP clients and register their tools
     await Promise.all(
       this._mcpClients.map(async (client) => {
         const tools = await client.listTools()
@@ -300,7 +320,9 @@ export class Agent implements AgentData {
       })
     )
 
-    await this.hooks.invokeCallbacks(new InitializedEvent({ agent: this }))
+    await this._pluginRegistry.initialize(this)
+
+    await this._hooksRegistry.invokeCallbacks(new InitializedEvent({ agent: this }))
 
     this._initialized = true
   }
@@ -413,7 +435,7 @@ export class Agent implements AgentData {
       // Invoke hook callbacks for hookable events (all current events are hookable;
       // the guard exists for future StreamEvent subclasses that may not be)
       if (event instanceof HookableEvent) {
-        await this.hooks.invokeCallbacks(event)
+        await this._hooksRegistry.invokeCallbacks(event)
       }
 
       this._printer?.processEvent(event)
@@ -423,7 +445,7 @@ export class Agent implements AgentData {
 
     // Yield final result as last event
     const agentResultEvent = new AgentResultEvent({ agent: this, result: result.value })
-    await this.hooks.invokeCallbacks(agentResultEvent)
+    await this._hooksRegistry.invokeCallbacks(agentResultEvent)
     this._printer?.processEvent(agentResultEvent)
     yield agentResultEvent
 

@@ -175,6 +175,24 @@ describe('Swarm', () => {
       await expect(swarm.invoke('start')).rejects.toThrow('swarm reached step limit')
     })
 
+    it('returns cancelled result with custom message when cancel is a string', async () => {
+      const swarm = new Swarm({
+        nodes: [createFinalAgent('a', 'hi')],
+        start: 'a',
+      })
+
+      swarm.addHook(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
+        event.cancel = 'agent not ready'
+      })
+
+      const { items, result } = await collectGenerator(swarm.stream('go'))
+
+      expect(result.status).toBe(Status.CANCELLED)
+
+      const cancelEvent = items.find((e) => e.type === 'nodeCancelEvent')
+      expect(cancelEvent).toEqual(expect.objectContaining({ nodeId: 'a', message: 'agent not ready' }))
+    })
+
     it('returns failed result when agent throws', async () => {
       const model = new MockMessageModel().addTurn(new Error('agent exploded'))
       const agent = new Agent({ model, printer: false, agentId: 'a', description: 'Agent a' })
@@ -199,7 +217,7 @@ describe('Swarm', () => {
         start: 'a',
       })
 
-      swarm.hooks.addCallback(MultiAgentInitializedEvent, () => {
+      swarm.addHook(MultiAgentInitializedEvent, () => {
         callCount++
       })
 
@@ -275,7 +293,7 @@ describe('Swarm', () => {
         start: 'a',
       })
 
-      swarm.hooks.addCallback(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
+      swarm.addHook(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
         event.cancel = true
       })
 
@@ -295,7 +313,7 @@ describe('Swarm', () => {
         start: 'a',
       })
 
-      swarm.hooks.addCallback(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
+      swarm.addHook(BeforeNodeCallEvent, (event: BeforeNodeCallEvent) => {
         event.cancel = 'agent not ready'
       })
 
