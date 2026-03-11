@@ -24,6 +24,7 @@ export {
   JsonValidationError,
   ConcurrentInvocationError,
   ModelThrottledError,
+  ToolValidationError,
 } from './errors.js'
 
 // JSON types
@@ -120,6 +121,11 @@ export { Tool } from './tools/tool.js'
 
 // FunctionTool implementation
 export { FunctionTool } from './tools/function-tool.js'
+export type { FunctionToolConfig, FunctionToolCallback } from './tools/function-tool.js'
+
+// ZodTool implementation
+export { ZodTool } from './tools/zod-tool.js'
+export type { ZodToolConfig } from './tools/zod-tool.js'
 
 // Tool factory function
 export { tool } from './tools/tool-factory.js'
@@ -146,6 +152,10 @@ export type {
   ModelMessageStopEvent,
   ModelMetadataEventData,
   ModelMetadataEvent,
+  RedactInputContent,
+  RedactOutputContent,
+  ModelRedactionEventData,
+  ModelRedactionEvent,
   ModelStreamEvent,
 } from './models/streaming.js'
 export { isModelStreamEvent } from './models/streaming.js'
@@ -157,7 +167,12 @@ export { Model } from './models/model.js'
 
 // Bedrock model provider
 export { BedrockModel as BedrockModel } from './models/bedrock.js'
-export type { BedrockModelConfig, BedrockModelOptions } from './models/bedrock.js'
+export type {
+  BedrockModelConfig,
+  BedrockModelOptions,
+  BedrockGuardrailConfig,
+  BedrockGuardrailRedactionConfig,
+} from './models/bedrock.js'
 
 // Agent streaming event types
 export type { AgentStreamEvent } from './types/agent.js'
@@ -185,7 +200,13 @@ export {
   ModelStreamUpdateEvent,
   InterruptEvent,
 } from './hooks/index.js'
-export type { HookCallback, HookProvider, HookableEventConstructor, ModelStopResponse } from './hooks/index.js'
+export type {
+  HookCallback,
+  HookProvider,
+  HookableEventConstructor,
+  ModelStopResponse,
+  Redaction,
+} from './hooks/index.js'
 
 // Interrupt system
 export { Interrupt, InterruptException } from './interrupt.js'
