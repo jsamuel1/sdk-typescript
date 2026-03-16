@@ -186,6 +186,7 @@ describe('MultiAgentNode', () => {
    */
   function mockOrchestrator(id: string, events: MultiAgentStreamEvent[]): MultiAgentBase {
     return {
+      type: 'multiAgent',
       id,
       invoke: async () => new MultiAgentResult({ results: [], duration: 0 }),
       async *stream() {
