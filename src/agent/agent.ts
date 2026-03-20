@@ -801,7 +801,8 @@ export class Agent implements LocalAgent, InvokableAgent {
     assistantMessage: Message,
     toolRegistry: ToolRegistry
   ): AsyncGenerator<AgentStreamEvent, Message, undefined> {
-    yield new BeforeToolsEvent({ agent: this, message: assistantMessage })
+    const beforeToolsEvent = new BeforeToolsEvent({ agent: this, message: assistantMessage })
+    yield beforeToolsEvent
 
     // Extract tool use blocks from assistant message
     const toolUseBlocks = assistantMessage.content.filter(
@@ -811,6 +812,25 @@ export class Agent implements LocalAgent, InvokableAgent {
     if (toolUseBlocks.length === 0) {
       // No tool use blocks found even though stopReason is toolUse
       throw new Error('Model indicated toolUse but no tool use blocks found in message')
+    }
+
+    // Cancel all tools if hook requested it
+    if (beforeToolsEvent.cancel) {
+      const cancelMessage = cancelToolMessage(beforeToolsEvent.cancel)
+      const toolResultBlocks = toolUseBlocks.map(
+        (block) =>
+          new ToolResultBlock({
+            toolUseId: block.toolUseId,
+            status: 'error',
+            content: [new TextBlock(cancelMessage)],
+          })
+      )
+      for (const result of toolResultBlocks) {
+        yield new ToolResultEvent({ agent: this, result })
+      }
+      const toolResultMessage = new Message({ role: 'user', content: toolResultBlocks })
+      yield new AfterToolsEvent({ agent: this, message: toolResultMessage })
+      return toolResultMessage
     }
 
     const toolResultBlocks: ToolResultBlock[] = []
@@ -859,7 +879,29 @@ export class Agent implements LocalAgent, InvokableAgent {
 
     // Retry loop for tool execution
     while (true) {
-      yield new BeforeToolCallEvent({ agent: this, toolUse, tool })
+      const beforeToolCallEvent = new BeforeToolCallEvent({ agent: this, toolUse, tool })
+      yield beforeToolCallEvent
+
+      // Cancel individual tool if hook requested it
+      if (beforeToolCallEvent.cancel) {
+        const cancelMessage = cancelToolMessage(beforeToolCallEvent.cancel)
+        const toolResult = new ToolResultBlock({
+          toolUseId: toolUseBlock.toolUseId,
+          status: 'error',
+          content: [new TextBlock(cancelMessage)],
+        })
+        const afterToolCallEvent = new AfterToolCallEvent({
+          agent: this,
+          toolUse,
+          tool,
+          result: toolResult,
+        })
+        yield afterToolCallEvent
+        if (afterToolCallEvent.retry) {
+          continue
+        }
+        return toolResult
+      }
 
       // Start tool span within loop span context
       const toolSpan = this._tracer.startToolCallSpan({
@@ -1016,6 +1058,15 @@ export class Agent implements LocalAgent, InvokableAgent {
     this.messages.push(message)
     return new MessageAddedEvent({ agent: this, message })
   }
+}
+
+/**
+ * Returns the cancel message for a cancelled tool.
+ * @param cancelTool - The cancel value (true or custom message)
+ * @returns The cancel message string
+ */
+function cancelToolMessage(cancelTool: true | string): string {
+  return typeof cancelTool === 'string' ? cancelTool : 'tool cancelled by hook'
 }
 
 /**
