@@ -68,6 +68,7 @@ import { Tracer } from '../telemetry/tracer.js'
 import { Meter } from '../telemetry/meter.js'
 import type { AttributeValue } from '@opentelemetry/api'
 import { logger } from '../logging/logger.js'
+import { CancelledError } from '../errors.js'
 
 /**
  * Recursive type definition for nested tool arrays.
@@ -225,6 +226,8 @@ export class Agent implements LocalAgent, InvokableAgent {
   private _mcpClients: McpClient[]
   private _initialized: boolean
   private _isInvoking: boolean = false
+  private _abortController = new AbortController()
+  private _abortSignal: AbortSignal = this._abortController.signal
   private _printer?: Printer
   private _structuredOutputSchema?: z.ZodSchema | undefined
   /** Tracer instance for creating and managing OpenTelemetry spans. */
@@ -351,6 +354,16 @@ export class Agent implements LocalAgent, InvokableAgent {
   }
 
   /**
+   * Throws {@link CancelledError} if cancellation has been requested.
+   * Called at cancellation checkpoints within the agent loop.
+   */
+  private _throwIfCancelled(): void {
+    if (this.isCancelled) {
+      throw new CancelledError()
+    }
+  }
+
+  /**
    * The tools this agent can use.
    */
   get tools(): Tool[] {
@@ -362,6 +375,58 @@ export class Agent implements LocalAgent, InvokableAgent {
    */
   get toolRegistry(): ToolRegistry {
     return this._toolRegistry
+  }
+
+  /**
+   * The cancellation signal for the current invocation.
+   *
+   * Tools can pass this to cancellable operations (e.g., `fetch(url, { signal: agent.cancelSignal })`).
+   * Hooks can check `event.agent.cancelSignal.aborted` to detect cancellation.
+   */
+  get cancelSignal(): AbortSignal {
+    return this._abortSignal
+  }
+
+  /**
+   * Cancels the current agent invocation cooperatively.
+   *
+   * The agent will stop at the next cancellation checkpoint:
+   * - During model response streaming
+   * - Before tool execution
+   * - Between sequential tool executions
+   * - At the top of each agent loop cycle
+   *
+   * If a tool is already executing, it will run to completion unless
+   * the tool checks {@link LocalAgent.cancelSignal | cancelSignal} internally.
+   *
+   * Hook callbacks can check `event.agent.cancelSignal.aborted` to detect
+   * cancellation and adjust their behavior accordingly.
+   *
+   * The stream/invoke call will return an AgentResult with `stopReason: 'cancelled'`.
+   * If the agent is not currently invoking, this is a no-op.
+   *
+   * @example
+   * ```typescript
+   * const agent = new Agent({ model, tools })
+   *
+   * // Cancel after 5 seconds
+   * setTimeout(() => agent.cancel(), 5000)
+   * const result = await agent.invoke('Do something')
+   * console.log(result.stopReason) // 'cancelled'
+   * ```
+   */
+  public cancel(): void {
+    if (this._isInvoking) {
+      this._abortController.abort()
+    }
+  }
+
+  /**
+   * Whether the current invocation has been cancelled.
+   * Returns `false` when the agent is idle.
+   */
+  private get isCancelled(): boolean {
+    return this._abortSignal.aborted
   }
 
   /**
@@ -425,7 +490,13 @@ export class Agent implements LocalAgent, InvokableAgent {
     args: InvokeArgs,
     options?: InvokeOptions
   ): AsyncGenerator<AgentStreamEvent, AgentResult, undefined> {
-    using _lock = this.acquireLock()
+    this.acquireLock()
+
+    // Create AbortController for this invocation and compose with external signal
+    this._abortController = new AbortController()
+    this._abortSignal = options?.cancelSignal
+      ? AbortSignal.any([this._abortController.signal, options.cancelSignal])
+      : this._abortController.signal
 
     await this.initialize()
 
@@ -443,8 +514,15 @@ export class Agent implements LocalAgent, InvokableAgent {
 
       return result.value
     } finally {
-      // Drain remaining events from _stream() so cleanup events (after events
-      // from finally blocks) still get their hooks and printer invoked.
+      // Release the invocation lock before any yields. The drain loop below
+      // yields events, and when for-await-of breaks, .return() only consumes
+      // one yield — any subsequent yield orphans the generator. Releasing the
+      // lock first ensures the agent can always be reinvoked.
+      this._isInvoking = false
+
+      // Drain remaining events from _stream() BEFORE clearing the abort
+      // signals, so that _stream's finally block can still inspect
+      // cancellation state and append a cancel message when needed.
       let result = await streamGenerator.return(undefined as never)
       while (!result.done) {
         try {
@@ -454,6 +532,10 @@ export class Agent implements LocalAgent, InvokableAgent {
         }
         result = await streamGenerator.next()
       }
+
+      // Reset controller and signal for next invocation
+      this._abortController = new AbortController()
+      this._abortSignal = this._abortController.signal
     }
   }
 
@@ -548,6 +630,8 @@ export class Agent implements LocalAgent, InvokableAgent {
 
       // Main agent loop - continues until model stops without requesting tools
       while (true) {
+        this._throwIfCancelled()
+
         // Start metrics cycle tracking
         const { cycleId, startTime: cycleStartTime } = this._meter.startCycle()
 
@@ -599,6 +683,36 @@ export class Agent implements LocalAgent, InvokableAgent {
             return result
           }
 
+          // Cancel before tool execution: create error results for all pending tools
+          if (this.isCancelled) {
+            const toolUseBlocks = modelResult.message.content.filter(
+              (block): block is ToolUseBlock => block.type === 'toolUseBlock'
+            )
+            const cancelBlocks = toolUseBlocks.map(
+              (block) =>
+                new ToolResultBlock({
+                  toolUseId: block.toolUseId,
+                  status: 'error',
+                  content: [new TextBlock('Tool execution cancelled')],
+                })
+            )
+            const toolResultMessage = new Message({ role: 'user', content: cancelBlocks })
+
+            yield this._appendMessage(modelResult.message)
+            yield this._appendMessage(toolResultMessage)
+
+            this._meter.endCycle(cycleStartTime)
+            this._tracer.endAgentLoopSpan(cycleSpan)
+
+            result = new AgentResult({
+              stopReason: 'cancelled',
+              lastMessage: modelResult.message,
+              traces: this._tracer.localTraces,
+              metrics: this._meter.metrics,
+            })
+            return result
+          }
+
           // Execute tools
           const toolResultMessage = yield* this.executeTools(modelResult.message, this._toolRegistry)
 
@@ -635,9 +749,37 @@ export class Agent implements LocalAgent, InvokableAgent {
         }
       }
     } catch (error) {
+      if (error instanceof CancelledError) {
+        // Cancelled during model streaming or at the top of a cycle.
+        // No partial messages have been appended (deferred append pattern).
+        const cancelMessage = new Message({
+          role: 'assistant',
+          content: [new TextBlock('Cancelled by user')],
+        })
+        yield this._appendMessage(cancelMessage)
+
+        result = new AgentResult({
+          stopReason: 'cancelled',
+          lastMessage: cancelMessage,
+          traces: this._tracer.localTraces,
+          metrics: this._meter.metrics,
+        })
+        return result
+      }
       caughtError = error as Error
       throw error
     } finally {
+      // If cancelled but the catch block was bypassed (generator terminated
+      // via .return() when the consumer breaks out of for-await), append an
+      // assistant message so the agent can be reinvoked with a new user prompt.
+      if (!caughtError && !result && this.isCancelled) {
+        const cancelMessage = new Message({
+          role: 'assistant',
+          content: [new TextBlock('Cancelled by user')],
+        })
+        yield this._appendMessage(cancelMessage)
+      }
+
       this._tracer.endAgentSpan(agentSpan, {
         ...(caughtError && { error: caughtError }),
         ...(result?.lastMessage && { response: result.lastMessage }),
@@ -812,6 +954,12 @@ export class Agent implements LocalAgent, InvokableAgent {
       // Yield error event - stream will invoke hooks
       yield errorEvent
 
+      // Let CancelledError propagate directly — no retry
+      // (we emit the AfterModelCall because we already emitted Before and we guarentee the pair)
+      if (error instanceof CancelledError) {
+        throw error
+      }
+
       // After yielding, hooks have been invoked and may have set retry
       if (errorEvent.retry) {
         return yield* this._invokeModel(toolChoice)
@@ -846,6 +994,8 @@ export class Agent implements LocalAgent, InvokableAgent {
     let result = await streamGenerator.next()
 
     while (!result.done) {
+      this._throwIfCancelled()
+
       const event = result.value
 
       if (isModelStreamEvent(event)) {
@@ -907,10 +1057,19 @@ export class Agent implements LocalAgent, InvokableAgent {
         toolResultBlocks.push(...cancelBlocks)
       } else {
         for (const toolUseBlock of toolUseBlocks) {
+          if (this.isCancelled) {
+            const cancelBlock = new ToolResultBlock({
+              toolUseId: toolUseBlock.toolUseId,
+              status: 'error',
+              content: [new TextBlock('Tool execution cancelled')],
+            })
+            toolResultBlocks.push(cancelBlock)
+            yield new ToolResultEvent({ agent: this, result: cancelBlock })
+            continue
+          }
+
           const toolResultBlock = yield* this.executeTool(toolUseBlock, toolRegistry)
           toolResultBlocks.push(toolResultBlock)
-
-          // Yield the tool result event as it's created
           yield new ToolResultEvent({ agent: this, result: toolResultBlock })
         }
       }

@@ -18,7 +18,7 @@ export interface ToolContext {
 
   /**
    * The agent instance that is executing this tool.
-   * Provides access to agent state and other agent-level information.
+   * Provides access to agent state, conversation history, and cancellation state.
    */
   agent: LocalAgent
 }
